@@ -95,40 +95,74 @@ def _handle_date(text: str, memory: Memory) -> str | None:
     return None
 
 
+# ── Calculation handler ───────────────────────────────────────────────────────
+#
+# FIX: The original fallback regex matched almost any string containing a digit
+# (e.g. "I have 3 cats", "born in 1990"), causing spurious calculator calls.
+#
+# Two-stage fix:
+#   1. Explicit trigger keywords still work as before.
+#   2. The raw-expression fallback now requires at least one arithmetic
+#      operator character (+  -  *  /  %  ^  **) or a known math function
+#      name to be present, so plain noun phrases with digits are ignored.
+#      The actual operator/function check lives in calculate() (tools.py),
+#      but we gate here too to avoid even calling calculate() on clear misses.
+#
+_CALC_OPERATORS_RE = re.compile(r"[\+\-\*\/\%\^]|sqrt|sin|cos|tan|log|exp|pow|ceil|floor")
+
 def _handle_calculation(text: str, memory: Memory) -> str | None:
-    triggers = ["calculate", "compute", "what is", "what's", "how much is",
-                "solve", "evaluate", "=", "+", "-", "*", "/", "**", "sqrt",
-                "squared", "cubed", "percent", "%"]
-    if not _contains(text, *triggers):
+    explicit_triggers = [
+        "calculate", "compute", "what is", "what's", "how much is",
+        "solve", "evaluate",
+    ]
+
+    # Path A — explicit trigger keyword present
+    expr = None
+    if _contains(text, *explicit_triggers):
+        expr = _extract(
+            text,
+            r"(?:calculate|compute|what(?:'s| is)|solve|evaluate)\s+(.+)",
+            1,
+        )
+        if not expr:
+            # bare "calculate" with no follow-up
+            return None
+
+    # Path B — looks like a raw math expression (must contain an operator)
+    if expr is None:
+        # Only proceed if the text contains an operator or math function
+        if not _CALC_OPERATORS_RE.search(text):
+            return None
+        candidate = _extract(
+            text,
+            r"([\d\s\.\+\-\*\/\%\^\(\)a-zA-Z_]+(?:\d[\d\s]*)?)",
+            1,
+        )
+        if not candidate or not re.search(r"\d", candidate):
+            return None
+        expr = candidate
+
+    # Strip anything that isn't a valid math character before passing to eval
+    expr = re.sub(r"[^\d\s\.\+\-\*\/\%\^\(\)a-zA-Z_]", "", expr).strip()
+    if not re.search(r"\d", expr):
         return None
-    # Try to extract a math expression
-    expr = _extract(text, r"(?:calculate|compute|what(?:'s| is)|solve|evaluate)\s+(.+)", 1)
-    if not expr:
-        # Try raw expressions: "12 * 4", "sqrt(16)", etc.
-        expr = _extract(text, r"([\d\s\.\+\-\*\/\%\^\(\)a-zA-Z]+(?:\d[\d\s]*)?)", 1)
-    if expr:
-        expr = re.sub(r"[^\d\s\.\+\-\*\/\%\^\(\)a-zA-Z_]", "", expr).strip()
-        if re.search(r"\d", expr):  # must contain at least a digit
-            return calculate(expr)
-    return None
+
+    return calculate(expr)
 
 
 def _handle_files(text: str, memory: Memory) -> str | None:
-    # List directory
     if _contains(text, "list files", "show files", "list directory",
                  "what's in", "what is in", "contents of", "ls ", "dir "):
         path_match = _extract(text, r"(?:in|of|directory|folder)\s+['\"]?([^\s'\"]+)['\"]?")
         path = path_match if path_match else "."
         return list_directory(path)
 
-    # Read file
     if _contains(text, "read file", "open file", "show file", "contents of file", "cat "):
         fname = _extract(text, r"(?:read|open|show|cat)\s+(?:file\s+)?['\"]?([^\s'\"]+\.\w+)['\"]?")
         if fname:
             return read_file_tool(fname)
         return "Which file should I read? Specify a filename."
 
-    # Create file
     if _contains(text, "create file", "make file", "new file", "write file"):
         fname = _extract(text, r"(?:create|make|new|write)\s+(?:a\s+)?(?:file\s+)?['\"]?([^\s'\"]+\.\w+)['\"]?")
         content_match = _extract(text, r"(?:with content|containing|with text)\s+['\"]?(.+)['\"]?$")
@@ -136,7 +170,6 @@ def _handle_files(text: str, memory: Memory) -> str | None:
             return create_file_tool(fname, content_match or "")
         return "What should I name the file?"
 
-    # Delete file
     if _contains(text, "delete file", "remove file", "erase file"):
         fname = _extract(text, r"(?:delete|remove|erase)\s+(?:file\s+)?['\"]?([^\s'\"]+\.\w+)['\"]?")
         if fname:
@@ -163,7 +196,6 @@ def _handle_system(text: str, memory: Memory) -> str | None:
 
 
 def _handle_memory_commands(text: str, memory: Memory) -> str | None:
-    # Remember a fact
     if _contains(text, "remember that", "don't forget", "keep in mind", "note that"):
         fact = _extract(text, r"(?:remember that|don't forget|keep in mind|note that)\s+(.+)")
         if fact:
@@ -171,7 +203,6 @@ def _handle_memory_commands(text: str, memory: Memory) -> str | None:
             memory.remember(key, fact)
             return f"Noted: *{fact}*"
 
-    # What do you remember?
     if _contains(text, "what do you remember", "what do you know about me",
                  "what have you noted", "show memory", "your memory"):
         if not memory.facts:
@@ -179,12 +210,10 @@ def _handle_memory_commands(text: str, memory: Memory) -> str | None:
         lines = "\n".join(f"- **{k}**: {v}" for k, v in memory.facts.items())
         return f"Here's what I remember:\n{lines}"
 
-    # Forget everything
     if _contains(text, "forget everything", "clear memory", "reset memory", "forget all"):
         memory.reset()
         return "Memory cleared. Starting fresh."
 
-    # Session duration
     if _contains(text, "how long", "session time", "how long have we", "session duration"):
         return f"We've been talking for **{memory.session_duration()}**."
 
@@ -290,7 +319,6 @@ def _handle_wikipedia(text: str, memory: Memory) -> str | None:
         if query and len(query) > 2:
             return wikipedia_search_and_summarize(query)
 
-    # Also trigger if text literally starts with "wiki "
     if text.startswith("wiki "):
         query = text[5:].strip()
         if query:
@@ -316,7 +344,6 @@ def _handle_question_fallback(text: str, memory: Memory) -> str | None:
     """
     Smart fallback: if the input looks like a factual question
     and no other handler matched, auto-search DuckDuckGo + Wikipedia.
-    This makes ARIA answer almost anything.
     """
     question_starters = [
         "what is", "what are", "what was", "what were",
@@ -329,20 +356,16 @@ def _handle_question_fallback(text: str, memory: Memory) -> str | None:
         "meaning of", "history of", "facts about",
     ]
     if not any(text.startswith(s) or f" {s} " in f" {text} " for s in question_starters):
-        # Also catch plain noun phrases if they're long enough (likely a search)
         if len(text.split()) < 3 or text.endswith("?") is False:
             return None
 
-    # Strip question marks and common filler for cleaner search
     query = re.sub(r"[?!]+$", "", text).strip()
     query = re.sub(r"^(?:please\s+|can you\s+|could you\s+)", "", query, flags=re.IGNORECASE)
 
-    # Try Wikipedia first — it gives cleaner structured answers
     result = wikipedia_search_and_summarize(query)
     if result and "No Wikipedia article" not in result:
         return result
 
-    # Fall back to DuckDuckGo web search
     return web_search(query)
 
 

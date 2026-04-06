@@ -2,3 +2,11 @@ fastapi
 uvicorn[standard]
 websockets
 python-dotenv
+
+# Safe math expression evaluator — replaces raw eval() in tools.py
+# Sandboxes user input so arbitrary Python cannot be executed via the calculator.
+asteval
+
+# Kokoro TTS — natural voice synthesis
+kokoro-onnx
+soundfile
