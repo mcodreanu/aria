@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from memory import Memory
 from aria_brain import process
+import ollama as ollama_engine
 import tts as tts_engine
 
 logging.basicConfig(level=logging.INFO)
@@ -72,6 +73,26 @@ async def lifespan(app: FastAPI):
             "kokoro-onnx not found — TTS will be unavailable. "
             "Install with: pip install kokoro-onnx soundfile"
         )
+
+    # ── Ollama probe ────────────────────────────────────────────────────────
+    if ollama_engine.is_available():
+        models = ollama_engine.list_models()
+        active = ollama_engine.active_model()
+        logger.info(
+            f"Ollama online — active model: {active} | "
+            f"pulled: {', '.join(models) if models else 'none'}"
+        )
+        if active not in " ".join(models):
+            logger.warning(
+                f"Model '{active}' doesn't appear to be pulled. "
+                f"Run: ollama pull {active}"
+            )
+    else:
+        logger.warning(
+            "Ollama not reachable — LLM fallback will be disabled. "
+            "Install at https://ollama.com/download and run: ollama pull mistral"
+        )
+
     yield
     logger.info("ARIA shutting down.")
 
@@ -100,10 +121,12 @@ async def index():
 
 @app.get("/health")
 async def health():
+    ollama_up = ollama_engine.is_available()
     return JSONResponse({
         "status": "online",
         "name": "ARIA",
         "tts": "kokoro" if tts_engine.is_available() else "browser-fallback",
+        "llm": ollama_engine.active_model() if ollama_up else "unavailable",
         "active_sessions": len(sessions),
     })
 
@@ -118,6 +141,23 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = tts_engine.ARIA_VOICE
     speed: float = tts_engine.ARIA_SPEED
+
+
+@app.get("/ollama/status")
+async def ollama_status():
+    """Return Ollama availability and active model — polled by the frontend."""
+    available = ollama_engine.is_available()
+    return JSONResponse({
+        "available": available,
+        "model":     ollama_engine.active_model() if available else None,
+        "models":    ollama_engine.list_models()  if available else [],
+    })
+
+
+@app.get("/ollama/models")
+async def ollama_models():
+    """Return the list of locally-pulled Ollama models."""
+    return JSONResponse({"models": ollama_engine.list_models()})
 
 
 @app.post("/tts")

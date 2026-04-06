@@ -1,10 +1,15 @@
 """
-ARIA Brain — Rule-based NLP engine.
-No external APIs, no ML models. Pure pattern matching + tools.
+ARIA Brain — Rule-based NLP engine with local LLM fallback.
+
+Handler pipeline (in order):
+  1. Fast rule-based handlers (greetings, time, files, search…)
+  2. _handle_llm_fallback  — Ollama local model for anything unmatched
+  3. _handle_unknown       — last resort if Ollama is also unavailable
 """
 
 import re
 import random
+import logging
 from memory import Memory
 from tools import (
     get_time, get_date, get_day, calculate,
@@ -12,6 +17,9 @@ from tools import (
     open_app, get_system_info,
 )
 from search import web_search, wikipedia_search_and_summarize
+import ollama as ollama_engine
+
+logger = logging.getLogger("aria.brain")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -48,10 +56,16 @@ def _handle_identity(text: str, memory: Memory) -> str | None:
     if not _contains(text, "who are you", "what are you", "your name",
                      "introduce yourself", "what's aria", "what is aria"):
         return None
+    llm_line = ""
+    if ollama_engine.is_available():
+        llm_line = (
+            f" I'm also backed by a local **{ollama_engine.active_model()}** "
+            f"language model via Ollama for anything that needs real reasoning."
+        )
     return (
         "I'm **ARIA** — Adaptive Reasoning & Intelligent Assistant. "
         "I run locally on your machine and can answer questions by searching "
-        "DuckDuckGo and Wikipedia, manage your files, do calculations, open apps, and more. "
+        f"DuckDuckGo and Wikipedia, manage your files, do calculations, open apps, and more.{llm_line} "
         "Ask me anything."
     )
 
@@ -266,7 +280,14 @@ def _handle_help(text: str, memory: Memory) -> str | None:
 - "What do you remember?" / "Clear memory"
 
 **💻 System**
-- "System info" — hardware & OS details"""
+- "System info" — hardware & OS details
+
+**🤖 Local AI (Ollama)**
+- Just chat freely — if no rule matches, ARIA falls back to a local LLM
+- "Explain the difference between TCP and UDP"
+- "Write a Python function that reverses a string"
+- Say **'use ollama'** to force the LLM regardless of other handlers
+- Run **'ollama status'** to see which model is loaded"""
 
 
 def _handle_farewell(text: str, memory: Memory) -> str | None:
@@ -369,6 +390,87 @@ def _handle_question_fallback(text: str, memory: Memory) -> str | None:
     return web_search(query)
 
 
+
+def _handle_force_ollama(text: str, memory: Memory) -> str | None:
+    """
+    Explicit escape hatch: prefix a message with 'use ollama' or 'ask llm'
+    to bypass all rule-based handlers and go straight to the LLM.
+    Useful for creative tasks, code generation, or anything conversational.
+    """
+    for prefix in ("use ollama ", "ask llm ", "ask the llm ", "llm "):
+        if text.startswith(prefix):
+            real_input = text[len(prefix):].strip()
+            if not real_input:
+                return "What would you like me to ask the LLM?"
+            return _call_ollama(real_input, memory)
+    return None
+
+
+def _call_ollama(user_input: str, memory: Memory) -> str:
+    """
+    Central helper — send user_input + session history to Ollama and return
+    the model's response, with graceful error messages on failure.
+    """
+    if not ollama_engine.is_available():
+        return None  # not an error — means Ollama just isn't running
+
+    history = memory.recent(10)  # last 5 exchanges for context
+
+    try:
+        response = ollama_engine.generate(user_input, history)
+        logger.info(f"[LLM] {ollama_engine.active_model()} responded ({len(response)} chars)")
+        return response
+    except TimeoutError:
+        logger.warning("[LLM] Ollama timed out")
+        return (
+            f"**{ollama_engine.active_model()}** is taking too long to respond. "
+            "This usually means the model is still loading — try again in a moment."
+        )
+    except RuntimeError as exc:
+        logger.warning(f"[LLM] Ollama error: {exc}")
+        return None  # fall through to _handle_unknown
+
+
+def _handle_ollama_status(text: str, memory: Memory) -> str | None:
+    """Show Ollama availability and loaded models."""
+    if not _contains(text, "ollama status", "ollama info", "llm status",
+                     "which model", "what model", "what llm"):
+        return None
+
+    if not ollama_engine.is_available():
+        return (
+            "**Ollama** is not running.\n"
+            "Install it at https://ollama.com/download, then run:\n"
+            "`ollama pull mistral` and restart ARIA."
+        )
+
+    models = ollama_engine.list_models()
+    active = ollama_engine.active_model()
+    model_list = "\n".join(f"  - {m}" for m in models) if models else "  (none pulled yet)"
+    return (
+        f"**Ollama** is online.\n"
+        f"**Active model:** `{active}`\n"
+        f"**Pulled models:**\n{model_list}\n\n"
+        f"Set a different model with the `OLLAMA_MODEL` env var and restart ARIA."
+    )
+
+
+def _handle_llm_fallback(text: str, memory: Memory) -> str | None:
+    """
+    Last intelligent fallback before the hard-coded error message.
+
+    Reached only when every rule-based handler above returned None — meaning
+    the input wasn't a greeting, a date query, a file command, a search
+    question, etc.  At this point we hand off to the local LLM, which can
+    handle free-form conversation, creative tasks, coding help, and anything
+    else the rule engine doesn't cover.
+
+    Returns None (not a string) if Ollama is unavailable or errors, so
+    _handle_unknown can still fire as the true last resort.
+    """
+    return _call_ollama(text, memory)
+
+
 def _handle_unknown(text: str, memory: Memory) -> str:
     """Last resort fallback — only reached if nothing else matched."""
     return (
@@ -405,6 +507,10 @@ HANDLERS = [
     _handle_wikipedia,
     _handle_web_search,
     _handle_question_fallback,
+    # ── Ollama LLM (after search, before hard unknown) ──
+    _handle_ollama_status,
+    _handle_force_ollama,
+    _handle_llm_fallback,
 ]
 
 

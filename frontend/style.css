@@ -424,6 +424,98 @@ footer {
   color: var(--accent);
 }
 
+/* ── Voice buttons ── */
+#mic-btn,
+#mute-btn {
+  flex-shrink: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    border-color 0.2s,
+    color 0.2s,
+    box-shadow 0.2s,
+    background 0.2s;
+}
+#mic-btn svg,
+#mute-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+#mic-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#mute-btn:hover {
+  border-color: #ffaa00;
+  color: #ffaa00;
+}
+
+/* Mic active — currently recording */
+#mic-btn.listening {
+  border-color: var(--danger);
+  color: var(--danger);
+  box-shadow:
+    0 0 0 3px rgba(255, 68, 102, 0.2),
+    0 0 16px rgba(255, 68, 102, 0.3);
+  animation: mic-pulse 1s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px rgba(255, 68, 102, 0.2),
+      0 0 16px rgba(255, 68, 102, 0.3);
+  }
+  50% {
+    box-shadow:
+      0 0 0 6px rgba(255, 68, 102, 0.1),
+      0 0 28px rgba(255, 68, 102, 0.5);
+  }
+}
+
+/* Wake word passive listen — subtle cyan ring */
+#mic-btn.wake-active {
+  border-color: var(--accent2);
+  color: var(--accent2);
+  box-shadow: 0 0 8px rgba(0, 136, 204, 0.3);
+}
+
+/* Muted state */
+#mute-btn.muted {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* ARIA speaking indicator */
+#mic-btn.speaking {
+  border-color: var(--success);
+  color: var(--success);
+  box-shadow: 0 0 12px rgba(0, 255, 170, 0.3);
+}
+
+/* ── Voice status bar ── */
+.voice-status {
+  font-size: 0.68rem;
+  color: var(--accent);
+  min-height: 16px;
+  margin-top: 6px;
+  padding-left: 2px;
+  letter-spacing: 0.05em;
+  transition: opacity 0.3s;
+  opacity: 0;
+}
+.voice-status.visible {
+  opacity: 1;
+}
+
 /* ── Links ── */
 .msg-body a {
   color: var(--accent);

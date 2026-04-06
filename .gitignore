@@ -23,9 +23,10 @@ dist/
 # ── ARIA specific ─────────────────────────────────────────────────────────────
 # Persistent memory file — contains personal data (name, notes, etc.)
 backend/aria_memory.json
-
-# Temp file from atomic writes
 backend/aria_memory.json.tmp
+
+# Kokoro TTS model files — large binaries (~85MB), downloaded automatically on first run
+backend/kokoro_models/
 
 # ── Environment & secrets ─────────────────────────────────────────────────────
 .env

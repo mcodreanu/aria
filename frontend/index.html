@@ -69,18 +69,50 @@
         </div>
 
         <div class="input-row">
+          <button id="mic-btn" title="Hold to speak / Wake word: Hey ARIA">
+            <svg
+              id="mic-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <rect x="9" y="2" width="6" height="12" rx="3" />
+              <path d="M5 10a7 7 0 0 0 14 0" />
+              <line x1="12" y1="19" x2="12" y2="22" />
+              <line x1="9" y1="22" x2="15" y2="22" />
+            </svg>
+          </button>
           <input
             id="input"
             type="text"
-            placeholder="Enter command or ask ARIA something..."
+            placeholder="Speak or type — say 'Hey ARIA' to activate voice..."
             autocomplete="off"
             spellcheck="false"
           />
+          <button id="mute-btn" title="Toggle voice output">
+            <svg
+              id="mute-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+              <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+            </svg>
+          </button>
           <button id="send-btn">SEND</button>
         </div>
+        <div class="voice-status" id="voice-status"></div>
         <p class="hint">
-          Press Enter to send &nbsp;·&nbsp; Try "Who is Nikola Tesla?" or
-          "search for Python tutorials" or "wiki black holes"
+          Press Enter or click 🎤 to speak &nbsp;·&nbsp; Wake word:
+          <strong>Hey ARIA</strong> &nbsp;·&nbsp; Click 🔊 to mute
         </p>
       </footer>
     </div>

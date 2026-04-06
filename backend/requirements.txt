@@ -7,6 +7,11 @@ python-dotenv
 # Sandboxes user input so arbitrary Python cannot be executed via the calculator.
 asteval
 
+# HTTP client — used by ollama.py for the generate call
+# (stdlib urllib is used for simple GETs; httpx gives better timeout control
+#  if you later add async streaming support)
+httpx
+
 # Kokoro TTS — natural voice synthesis
 kokoro-onnx
 soundfile
