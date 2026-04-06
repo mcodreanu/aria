@@ -32,15 +32,14 @@ from sysinfo.weather import get_weather
 from sysinfo.converter import convert
 from sysinfo.clipboard_tool import handle_clipboard_read, handle_clipboard_write, handle_screenshot
 import sysinfo.scheduler as scheduler_engine
+import sysinfo.calendar_tool as calendar_engine
 
 logger = logging.getLogger("aria.brain")
 
 MUSIC_PLAY_PREFIX = "MUSIC_PLAY:"
 MUSIC_STOP_PREFIX = "MUSIC_STOP:"
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _contains(text: str, *keywords) -> bool:
     return any(k in text for k in keywords)
@@ -49,9 +48,7 @@ def _extract(text: str, pattern: str, group: int = 1):
     m = re.search(pattern, text, re.IGNORECASE)
     return m.group(group).strip() if m else None
 
-# ---------------------------------------------------------------------------
-# Existing intent handlers (unchanged)
-# ---------------------------------------------------------------------------
+# ── Existing handlers ─────────────────────────────────────────────────────────
 
 def _handle_greeting(text, memory):
     greetings = ["hello","hi","hey","good morning","good evening",
@@ -208,39 +205,46 @@ def _handle_help(text, memory):
 **📁 Files**
 - "List files" / "Read file notes.txt" / "Create file todo.txt with content ..."
 
+**📎 File Upload**
+- Drag & drop or click the 📎 button to upload files
+- Upload a PDF / text / image and ask questions about it
+- "Summarize this file" / "Transform this code to add type hints"
+
+**📅 Calendar**
+- "What's on my calendar today?" / "Events this week"
+- "Add event Team meeting on 2025-06-15 14:00"
+- "Search calendar for dentist"
+
 **🎵 Music**
-- "Play Bohemian Rhapsody" / "Play some lofi hip hop"
-- "Stop music" / "What's playing?"
+- "Play Bohemian Rhapsody" / "Stop music"
 
 **🌤 Weather**
-- "What's the weather in Palma?" / "Weather in Tokyo" / "Is it raining in London?"
+- "What's the weather in Palma?" / "Weather in Tokyo"
 
 **💱 Conversions**
-- "Convert 250 EUR to USD" / "15 miles to km" / "100 F to C" / "5 kg to lbs"
+- "Convert 250 EUR to USD" / "15 miles to km" / "100 F to C"
 
 **📋 Clipboard**
-- "Read my clipboard" / "What's in my clipboard?"
-- "Copy [text] to clipboard"
+- "Read my clipboard" / "Copy [text] to clipboard"
 
 **📸 Screenshot**
-- "Take a screenshot" / "Capture my screen"
+- "Take a screenshot"
 
 **⏰ Reminders**
 - "Remind me in 20 minutes to check the oven"
-- "Set a reminder for 1 hour — call mom"
-- "Show my reminders" / "Cancel reminder [id]" / "Cancel all reminders"
+- "Show my reminders" / "Cancel all reminders"
 
 **🖥 Apps**
-- "Open calculator" / "Open browser" / "Open terminal"
+- "Open calculator" / "Open browser"
 
 **🧠 Memory**
-- "My name is Alex" / "Remember that deadline is Friday" / "What do you remember?"
+- "My name is Alex" / "Remember that deadline is Friday"
 
 **💻 System**
 - "System info"
 
-**📜 History**
-- "Search history for Python" / "Show my chat history" / "How many messages have we exchanged?"
+**⚡ Dashboard**
+- Visit **/dashboard** for system stats, preferences, and Ollama model switcher
 
 **🤖 Local AI (Ollama)**
 - Free-form chat, code generation, reasoning
@@ -317,10 +321,6 @@ def _handle_question_fallback(text, memory):
         return result
     return web_search(query)
 
-# ---------------------------------------------------------------------------
-# NEW: Weather
-# ---------------------------------------------------------------------------
-
 def _handle_weather(text, memory):
     weather_triggers = [
         "weather","temperature","forecast","raining","snowing",
@@ -330,28 +330,16 @@ def _handle_weather(text, memory):
     ]
     if not _contains(text, *weather_triggers):
         return None
-
-    # Extract location: "weather in X", "weather for X", "X weather"
     location = (
         _extract(text, r"weather\s+(?:in|for|at)\s+(.+?)(?:\?|$)") or
         _extract(text, r"(?:in|for|at)\s+(.+?)\s+weather") or
         _extract(text, r"weather\s+(?:in|for|at)?\s*(.+?)(?:\s*\?|$)") or
         ""
     )
-
-    # Strip common filler words that aren't part of the location
     if location:
-        location = re.sub(
-            r"^\s*(?:the\s+)?(?:city\s+of\s+)?", "", location, flags=re.IGNORECASE
-        ).strip()
-        location = re.sub(r"\s*(?:today|tomorrow|now|currently|right now)\s*$",
-                          "", location, flags=re.IGNORECASE).strip()
-
+        location = re.sub(r"^\s*(?:the\s+)?(?:city\s+of\s+)?", "", location, flags=re.IGNORECASE).strip()
+        location = re.sub(r"\s*(?:today|tomorrow|now|currently|right now)\s*$", "", location, flags=re.IGNORECASE).strip()
     return get_weather(location)
-
-# ---------------------------------------------------------------------------
-# NEW: Unit & currency conversion
-# ---------------------------------------------------------------------------
 
 def _handle_conversion(text, memory):
     conversion_triggers = [
@@ -362,49 +350,29 @@ def _handle_conversion(text, memory):
     ]
     if not _contains(text, *conversion_triggers):
         return None
-
-    result = convert(text)
-    return result   # None means "not a conversion" → fall through to LLM
-
-# ---------------------------------------------------------------------------
-# NEW: Clipboard
-# ---------------------------------------------------------------------------
+    return convert(text)
 
 def _handle_clipboard(text, memory):
-    # Read
     if _contains(text, "read my clipboard","what's in my clipboard",
                  "whats in my clipboard","clipboard content","show clipboard",
                  "paste from clipboard","read clipboard"):
         return handle_clipboard_read()
-
-    # Write / copy
     copy_match = _extract(text, r"(?:copy|write to clipboard|add to clipboard)\s+['\"]?(.+?)['\"]?\s*(?:to clipboard)?$")
     if copy_match and _contains(text, "copy","clipboard"):
         return handle_clipboard_write(copy_match)
-
     return None
-
-# ---------------------------------------------------------------------------
-# NEW: Screenshot
-# ---------------------------------------------------------------------------
 
 def _handle_screenshot(text, memory):
     if not _contains(text, "screenshot","screen capture","capture my screen",
                      "take a screenshot","what's on my screen","whats on my screen",
                      "capture screen","save screenshot"):
         return None
-
     import os
     vision_model = os.getenv("OLLAMA_VISION_MODEL", "").strip() or None
     ollama_host  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     return handle_screenshot(ollama_host=ollama_host, vision_model=vision_model)
 
-# ---------------------------------------------------------------------------
-# NEW: Reminders / scheduler
-# ---------------------------------------------------------------------------
-
 def _handle_reminders(text, memory):
-    # List reminders
     if _contains(text, "show reminders","list reminders","my reminders",
                  "pending reminders","what reminders","any reminders"):
         reminders = scheduler_engine.list_reminders()
@@ -413,24 +381,21 @@ def _handle_reminders(text, memory):
         import datetime
         lines = ["**Pending reminders:**"]
         for r in reminders:
-            fire_dt = datetime.datetime.fromtimestamp(r["fire_at"])
+            fire_dt  = datetime.datetime.fromtimestamp(r["fire_at"])
             time_str = fire_dt.strftime("%H:%M on %b %d")
             lines.append(f"- `{r['id']}` — *{r['text']}* at **{time_str}**")
         return "\n".join(lines)
 
-    # Cancel all
     if _contains(text, "cancel all reminders","clear all reminders","delete all reminders"):
         n = scheduler_engine.cancel_all()
         return f"Cancelled **{n}** reminder{'s' if n != 1 else ''}."
 
-    # Cancel by id
     cancel_id = _extract(text, r"(?:cancel|delete|remove)\s+reminder\s+([a-f0-9]{6,8})")
     if cancel_id:
         if scheduler_engine.cancel_reminder(cancel_id):
             return f"Reminder `{cancel_id}` cancelled."
         return f"No reminder found with id `{cancel_id}`."
 
-    # Add reminder — must match before generic "remind" check
     if not scheduler_engine.is_available():
         if _contains(text, "remind me","set a reminder","set reminder"):
             return (
@@ -454,8 +419,6 @@ def _handle_reminders(text, memory):
         )
         if "error" in reminder:
             return reminder["error"]
-
-        # Format friendly time
         secs = int(parsed["in_seconds"])
         if secs < 60:
             time_str = f"{secs} second{'s' if secs != 1 else ''}"
@@ -465,31 +428,72 @@ def _handle_reminders(text, memory):
         else:
             hrs = secs / 3600
             time_str = f"{hrs:g} hour{'s' if hrs != 1 else ''}"
-
         return (
             f"⏰ Reminder set! I'll remind you to **{parsed['message']}** "
             f"in **{time_str}**. *(id: `{reminder['id']}`)*"
         )
+    return None
+
+# ── NEW: Calendar handler ─────────────────────────────────────────────────────
+
+def _handle_calendar(text, memory):
+    calendar_triggers = [
+        "calendar","schedule","event","appointment","meeting",
+        "what's on","whats on","do i have","my day","my week",
+        "add event","create event","new event","book",
+    ]
+    if not _contains(text, *calendar_triggers):
+        return None
+
+    # List today
+    if _contains(text, "today","this morning","tonight","today's schedule"):
+        return calendar_engine.get_events_today()
+
+    # List week
+    if _contains(text, "this week","next 7 days","week ahead","weekly"):
+        return calendar_engine.get_events_week()
+
+    # Upcoming
+    if _contains(text, "upcoming","next events","what's coming","schedule"):
+        n = _extract(text, r"next\s+(\d+)\s+event")
+        return calendar_engine.get_upcoming(int(n) if n else 5)
+
+    # Search
+    search_q = _extract(text, r"(?:search|find|look for)\s+(?:in\s+)?(?:calendar|schedule|events?)\s+(?:for\s+)?(.+)")
+    if search_q:
+        return calendar_engine.search_events(search_q)
+
+    # Add event — "add event <title> on <date> [at <time>]"
+    add_m = re.search(
+        r"(?:add|create|new|book|schedule)\s+(?:an?\s+)?(?:event|meeting|appointment)?\s+"
+        r"['\"]?(.+?)['\"]?\s+(?:on|for|at)\s+(.+?)(?:\s+(?:to|until|ending)\s+(.+))?$",
+        text, re.IGNORECASE
+    )
+    if add_m:
+        title     = add_m.group(1).strip()
+        start_str = add_m.group(2).strip()
+        end_str   = add_m.group(3).strip() if add_m.group(3) else None
+        return calendar_engine.add_event(title, start_str, end_str)
+
+    # Fallback — show today if "calendar" mentioned without specific action
+    if _contains(text, "calendar","my schedule"):
+        return calendar_engine.get_events_today()
 
     return None
 
-# ---------------------------------------------------------------------------
-# NEW: Conversation history search
-# ---------------------------------------------------------------------------
+# ── History search handler ─────────────────────────────────────────────────────
 
 def _handle_history_search(text, memory):
     if not _contains(text, "search history","search my history","find in history",
                      "history search","past conversations","previous conversations",
                      "chat history","conversation history","how many messages"):
         return None
-
-    # Stats
     if _contains(text, "how many messages","total messages","conversation stats"):
         try:
             from sysinfo.conversations import store
-            stats = store.stats()
-            total_s = stats.get("total_sessions", 0)
-            total_m = stats.get("total_messages", 0)
+            stats    = store.stats()
+            total_s  = stats.get("total_sessions", 0)
+            total_m  = stats.get("total_messages", 0)
             return (
                 f"**Conversation history:**\n"
                 f"- **{total_s}** sessions\n"
@@ -497,8 +501,6 @@ def _handle_history_search(text, memory):
             )
         except Exception:
             return "Conversation history database not available."
-
-    # Search
     query = (
         _extract(text, r"search(?:\s+(?:history|my history|conversations?))?\s+for\s+(.+)") or
         _extract(text, r"find\s+(?:in\s+history\s+)?['\"]?(.+?)['\"]?\s*(?:in\s+history)?$") or
@@ -513,17 +515,16 @@ def _handle_history_search(text, memory):
             import datetime
             lines = [f"**History results for \"{query}\":**"]
             for r in results:
-                dt = datetime.datetime.fromtimestamp(r["ts"]).strftime("%b %d %H:%M")
+                dt         = datetime.datetime.fromtimestamp(r["ts"]).strftime("%b %d %H:%M")
                 role_label = "You" if r["role"] == "user" else "ARIA"
-                preview = r["text"][:120] + ("..." if len(r["text"]) > 120 else "")
+                preview    = r["text"][:120] + ("..." if len(r["text"]) > 120 else "")
                 lines.append(f"- [{dt}] **{role_label}:** *{preview}*")
             return "\n".join(lines)
         except Exception as e:
             return f"History search failed: {e}"
-
     return None
 
-# ── Music ────────────────────────────────────────────────────────────────────
+# ── Music ─────────────────────────────────────────────────────────────────────
 
 def _handle_music(text, memory):
     stop_phrases = [
@@ -568,7 +569,7 @@ def _handle_music(text, memory):
 
     return None
 
-# ── Ollama ───────────────────────────────────────────────────────────────────
+# ── Ollama ────────────────────────────────────────────────────────────────────
 
 def _handle_force_ollama(text, memory):
     for prefix in ("use ollama ","ask llm ","ask the llm ","llm "):
@@ -607,7 +608,7 @@ def _handle_ollama_status(text, memory):
     model_list = "\n".join(f"  - {m}" for m in models) if models else "  (none pulled yet)"
     return (f"**Ollama** is online.\n**Active model:** `{active}`\n"
             f"**Pulled models:**\n{model_list}\n\n"
-            "Set a different model with the `OLLAMA_MODEL` env var and restart ARIA.")
+            "Switch models via the **/dashboard** or set `OLLAMA_MODEL` env var and restart.")
 
 def _handle_llm_fallback(text, memory):
     return _call_ollama(text, memory)
@@ -620,11 +621,12 @@ def _handle_unknown(text, memory):
             "- Say **'play [song]'** to play music\n"
             "- Say **'weather in [city]'** for the forecast\n"
             "- Say **'convert [x] to [y]'** for unit/currency conversion\n"
-            "- Say **'help'** to see all my built-in commands")
+            "- Say **'what's on my calendar'** for today's events\n"
+            "- Upload a file using the 📎 button\n"
+            "- Visit **/dashboard** for settings\n"
+            "- Say **'help'** to see all commands")
 
-# ---------------------------------------------------------------------------
-# Handler registry
-# ---------------------------------------------------------------------------
+# ── Handler registry ──────────────────────────────────────────────────────────
 
 HANDLERS = [
     _handle_greeting,
@@ -637,15 +639,16 @@ HANDLERS = [
     _handle_help,
     _handle_memory_commands,
     _handle_history,
-    _handle_history_search,       # NEW
+    _handle_history_search,
     _handle_date,
     _handle_time,
-    _handle_weather,              # NEW — before calculation (avoids "how hot" clash)
-    _handle_conversion,           # NEW — before calculation
+    _handle_weather,
+    _handle_conversion,
     _handle_calculation,
-    _handle_reminders,            # NEW
-    _handle_clipboard,            # NEW
-    _handle_screenshot,           # NEW
+    _handle_calendar,           # NEW
+    _handle_reminders,
+    _handle_clipboard,
+    _handle_screenshot,
     _handle_music,
     _handle_files,
     _handle_open_app,
@@ -687,7 +690,6 @@ async def process_stream(user_input: str, memory: Memory) -> AsyncIterator[str]:
             yield response
             return
 
-    # LLM streaming
     llm_input = text
     for prefix in ("use ollama ","ask llm ","ask the llm ","llm "):
         if text.startswith(prefix):
@@ -699,7 +701,7 @@ async def process_stream(user_input: str, memory: Memory) -> AsyncIterator[str]:
             break
 
     if ollama_engine.is_available():
-        history = memory.recent(10)
+        history    = memory.recent(10)
         full_parts: list[str] = []
         had_chunks = False
         try:

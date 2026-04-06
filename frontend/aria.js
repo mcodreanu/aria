@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// ARIA Frontend — Fast + correct ordered TTS pipeline
+// ARIA Frontend — File upload · Copy buttons · Persistent prefs · Ordered TTS
 // ─────────────────────────────────────────────────────────────────────────────
 
 const chat = document.getElementById("chat");
@@ -15,33 +15,66 @@ let ws = null;
 let typingEl = null;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Persistent preferences — load once at boot, apply immediately
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _prefs = {
+  muted: false,
+  tts_voice: "af_heart",
+  tts_speed: 1.0,
+  theme: "dark",
+  ollama_model: "mistral",
+};
+
+async function loadPrefs() {
+  try {
+    const r = await fetch("/prefs");
+    if (r.ok) {
+      _prefs = await r.json();
+      applyPrefs();
+    }
+  } catch (_) {}
+}
+
+function applyPrefs() {
+  isMuted = !!_prefs.muted;
+  muteBtn.innerHTML = isMuted ? ICON_SPEAKER_OFF : ICON_SPEAKER_ON;
+  muteBtn.classList.toggle("muted", isMuted);
+  document.documentElement.setAttribute("data-theme", _prefs.theme || "dark");
+}
+
+async function savePref(key, value) {
+  _prefs[key] = value;
+  try {
+    await fetch("/prefs", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [key]: value }),
+    });
+  } catch (_) {}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TTS — ordered fetch chain → ordered playback queue
 // ─────────────────────────────────────────────────────────────────────────────
 
 let isMuted = false;
 let isSpeaking = false;
-let _ttsReady = false; // unlocked after first user interaction
-let audioQueue = []; // [{url}] — fully resolved, ready to play in order
+let _ttsReady = false;
+let audioQueue = [];
 let currentAudio = null;
-
-// Serial fetch chain: each chunk waits for the previous fetch to finish
-// before starting its own. This guarantees audioQueue is filled in order
-// even if short sentences synthesize faster than long ones.
 let _fetchChain = Promise.resolve();
 
-// Sentence buffer config
-const MIN_CHUNK = 8; // ignore fragments shorter than this
-const EAGER_CHARS = 80; // flush mid-sentence if buffer exceeds this
-
-// ── TTS status / prewarm ────────────────────────────────────────────────────
+const MIN_CHUNK = 8;
+const EAGER_CHARS = 80;
+const _BREAK_RE = /([.!?]['")\]]*(?:\s+|$)|[,;:]\s+)/g;
 
 async function initTTS() {
   try {
-    const res = await fetch("/tts/status");
-    const data = await res.json();
+    const r = await fetch("/tts/status");
+    const data = await r.json();
     if (data.available) {
       setVoiceStatus("🎙 Kokoro voice ready", 3000);
-      // Prewarm: load ONNX model before the first real request
       fetch("/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -55,8 +88,6 @@ async function initTTS() {
   }
 }
 
-// ── Core fetch (one sentence at a time, called serially via _fetchChain) ───
-
 async function _doFetch(text) {
   const clean = text.trim();
   if (!clean || isMuted) return null;
@@ -64,7 +95,11 @@ async function _doFetch(text) {
     const res = await fetch("/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: clean }),
+      body: JSON.stringify({
+        text,
+        voice: _prefs.tts_voice || "af_heart",
+        speed: _prefs.tts_speed || 1.0,
+      }),
     });
     if (!res.ok) return null;
     const blob = await res.blob();
@@ -73,8 +108,6 @@ async function _doFetch(text) {
     return null;
   }
 }
-
-// ── Playback ────────────────────────────────────────────────────────────────
 
 function _playNext() {
   if (isMuted || audioQueue.length === 0) {
@@ -87,12 +120,10 @@ function _playNext() {
     _playNext();
     return;
   }
-
   const audio = new Audio(item.url);
   currentAudio = audio;
   isSpeaking = true;
   micBtn.classList.add("speaking");
-
   const done = () => {
     URL.revokeObjectURL(item.url);
     currentAudio = null;
@@ -103,13 +134,10 @@ function _playNext() {
   audio.play().catch(done);
 }
 
-// ── Public: enqueue a text chunk for TTS ───────────────────────────────────
-// Each call appends to _fetchChain so fetches always complete in submission order.
-
 function speakChunk(text) {
   if (isMuted || musicPlaying || !text.trim()) return;
   _fetchChain = _fetchChain.then(async () => {
-    if (isMuted || musicPlaying) return; // check again after the await
+    if (isMuted || musicPlaying) return;
     const item = await _doFetch(text);
     if (item) {
       audioQueue.push(item);
@@ -118,31 +146,23 @@ function speakChunk(text) {
   });
 }
 
-// ── Stop everything and reset ───────────────────────────────────────────────
-
 function stopSpeaking() {
   if (currentAudio) {
     currentAudio.pause();
     currentAudio = null;
   }
   audioQueue = [];
-  _fetchChain = Promise.resolve(); // discard pending fetches
+  _fetchChain = Promise.resolve();
   isSpeaking = false;
   micBtn.classList.remove("speaking");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Sentence buffer — splits streamed text into natural TTS chunks
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Sentence buffer ──────────────────────────────────────────────────────────
 
 let _sentenceBuffer = "";
 
-// Sentence-end punctuation or clause-break (comma / semicolon / colon)
-const _BREAK_RE = /([.!?]['")\]]*(?:\s+|$)|[,;:]\s+)/g;
-
 function _flushSentences(text, force) {
   _sentenceBuffer += text;
-
   const buf = _sentenceBuffer;
   const chunks = [];
   let last = 0;
@@ -158,7 +178,6 @@ function _flushSentences(text, force) {
     }
   }
 
-  // Eager flush: if the unsent tail is very long, cut at a word boundary
   const tail = buf.slice(last);
   if (tail.length >= EAGER_CHARS) {
     const cut = tail.lastIndexOf(" ", EAGER_CHARS);
@@ -171,9 +190,7 @@ function _flushSentences(text, force) {
   }
 
   _sentenceBuffer = buf.slice(last);
-
-  for (const sentence of chunks) speakChunk(stripMarkdown(sentence));
-
+  for (const s of chunks) speakChunk(stripMarkdown(s));
   if (force && _sentenceBuffer.trim().length >= MIN_CHUNK) {
     speakChunk(stripMarkdown(_sentenceBuffer.trim()));
     _sentenceBuffer = "";
@@ -197,6 +214,7 @@ muteBtn.addEventListener("click", () => {
   muteBtn.classList.toggle("muted", isMuted);
   muteBtn.innerHTML = isMuted ? ICON_SPEAKER_OFF : ICON_SPEAKER_ON;
   muteBtn.title = isMuted ? "Unmute voice" : "Mute voice";
+  savePref("muted", isMuted);
   if (isMuted) {
     stopSpeaking();
     setVoiceStatus("🔇 Voice muted", 2000);
@@ -204,6 +222,168 @@ muteBtn.addEventListener("click", () => {
     setVoiceStatus("🔊 Voice on", 2000);
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File Upload
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _pendingFile = null; // {id, name, mime, size} — set after successful upload
+
+function injectUploadButton() {
+  const inputRow = document.querySelector(".input-row");
+  if (!inputRow || document.getElementById("upload-btn")) return;
+
+  const btn = document.createElement("button");
+  btn.id = "upload-btn";
+  btn.title = "Upload file";
+  btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66
+             l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+  </svg>`;
+  btn.style.cssText = `
+    flex-shrink:0; background:var(--panel); border:1px solid var(--border);
+    border-radius:2px; color:var(--text-dim); cursor:pointer; padding:10px;
+    display:flex; align-items:center; justify-content:center;
+    transition:border-color .2s,color .2s;
+  `;
+  btn.onmouseenter = () => {
+    btn.style.borderColor = "var(--accent2)";
+    btn.style.color = "var(--accent)";
+  };
+  btn.onmouseleave = () => {
+    btn.style.borderColor = "var(--border)";
+    btn.style.color = "var(--text-dim)";
+  };
+  btn.addEventListener("click", () => fileInputEl.click());
+
+  inputRow.insertBefore(btn, inputRow.firstChild);
+}
+
+// Hidden file input
+const fileInputEl = document.createElement("input");
+fileInputEl.type = "file";
+fileInputEl.accept =
+  "image/*,.pdf,.txt,.md,.py,.js,.ts,.json,.csv,.html,.css,.xml,.yaml,.yml,.sh,.c,.cpp,.java,.go,.rs,.rb,.php";
+fileInputEl.style.display = "none";
+document.body.appendChild(fileInputEl);
+
+fileInputEl.addEventListener("change", () => {
+  const file = fileInputEl.files[0];
+  if (file) handleFileSelected(file);
+  fileInputEl.value = "";
+});
+
+// Drag & drop on the whole chat area
+chat.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  chat.style.borderColor = "var(--accent)";
+});
+chat.addEventListener("dragleave", () => {
+  chat.style.borderColor = "";
+});
+chat.addEventListener("drop", (e) => {
+  e.preventDefault();
+  chat.style.borderColor = "";
+  const file = e.dataTransfer.files[0];
+  if (file) handleFileSelected(file);
+});
+
+async function handleFileSelected(file) {
+  // Show upload indicator
+  const uploadMsg = appendUploadIndicator(file.name);
+
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch("/upload", { method: "POST", body: formData });
+    if (!res.ok) throw new Error(await res.text());
+    const meta = await res.json();
+
+    _pendingFile = meta;
+    updateUploadIndicator(uploadMsg, meta);
+
+    // Pre-fill input with a prompt if it's blank
+    if (!input.value.trim()) {
+      input.value = "Summarize this file";
+      input.focus();
+    }
+  } catch (err) {
+    uploadMsg.innerHTML = `<span style="color:var(--danger)">❌ Upload failed: ${escHtml(String(err))}</span>`;
+    _pendingFile = null;
+  }
+}
+
+function appendUploadIndicator(filename) {
+  const el = document.createElement("div");
+  el.className = "msg user";
+  el.style.alignItems = "center";
+  el.innerHTML = `
+    <div class="msg-avatar">ME</div>
+    <div class="msg-body" style="display:flex;align-items:center;gap:8px;
+         font-size:.82rem;color:var(--text-dim)">
+      <span style="animation:spin .8s linear infinite;display:inline-block">⏳</span>
+      Uploading <strong>${escHtml(filename)}</strong>…
+    </div>`;
+  chat.appendChild(el);
+  scrollBottom();
+  return el.querySelector(".msg-body");
+}
+
+function updateUploadIndicator(bodyEl, meta) {
+  const sizeKb = Math.round(meta.size / 1024);
+  bodyEl.innerHTML = `
+    📎 <strong>${escHtml(meta.name)}</strong>
+    <span style="color:var(--text-dim);font-size:.75rem">${sizeKb} KB · ${meta.mime}</span>
+    <button onclick="clearPendingFile()" style="background:transparent;border:none;
+      color:var(--text-dim);cursor:pointer;font-size:.8rem;padding:0 4px" title="Remove">✕</button>`;
+}
+
+function clearPendingFile() {
+  _pendingFile = null;
+  // Remove indicator from chat
+  const msgs = chat.querySelectorAll(".msg.user .msg-body");
+  for (const m of msgs) {
+    if (m.querySelector("button[onclick='clearPendingFile()']")) {
+      m.closest(".msg").remove();
+      break;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Copy button on code blocks
+// ─────────────────────────────────────────────────────────────────────────────
+
+function addCopyButtons(container) {
+  container.querySelectorAll("pre").forEach((pre) => {
+    if (pre.querySelector(".copy-btn")) return; // already has one
+    const btn = document.createElement("button");
+    btn.className = "copy-btn";
+    btn.textContent = "Copy";
+    btn.title = "Copy code";
+    btn.addEventListener("click", async () => {
+      const code = pre.innerText;
+      try {
+        await navigator.clipboard.writeText(code);
+        btn.textContent = "✓";
+        btn.style.color = "var(--success)";
+        setTimeout(() => {
+          btn.textContent = "Copy";
+          btn.style.color = "";
+        }, 1800);
+      } catch {
+        btn.textContent = "Error";
+        setTimeout(() => {
+          btn.textContent = "Copy";
+        }, 1800);
+      }
+    });
+    pre.style.position = "relative";
+    pre.appendChild(btn);
+  });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Music Player
@@ -238,7 +418,7 @@ function createMusicPlayer(title, url, duration, thumbnail) {
     </div>
     <div class="mp-seek-row">
       <span class="mp-time mp-elapsed" id="mp-elapsed">0:00</span>
-      <div class="mp-seek-wrap" id="mp-seek-wrap">
+      <div class="mp-seek-wrap">
         <div class="mp-bar-bg">
           <div class="mp-bar-buffer" id="mp-bar-buffer"></div>
           <div class="mp-bar-fill"   id="mp-bar-fill"></div>
@@ -257,17 +437,18 @@ function createMusicPlayer(title, url, duration, thumbnail) {
       <div class="mp-spacer"></div>
       <span class="mp-speed-label">SPEED</span>
       <select class="mp-speed-select" id="mp-speed-select">
-        <option value="0.5">0.5×</option>
-        <option value="0.75">0.75×</option>
-        <option value="1" selected>1×</option>
-        <option value="1.25">1.25×</option>
-        <option value="1.5">1.5×</option>
-        <option value="2">2×</option>
+        <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+        <option value="1" selected>1×</option><option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option><option value="2">2×</option>
       </select>
     </div>`;
 
-  const footer = document.querySelector("footer");
-  footer.parentElement.insertBefore(musicPlayerEl, footer);
+  document
+    .querySelector("footer")
+    .parentElement.insertBefore(
+      musicPlayerEl,
+      document.querySelector("footer"),
+    );
 
   musicAudio = new Audio(url);
   musicAudio.crossOrigin = "anonymous";
@@ -281,8 +462,8 @@ function createMusicPlayer(title, url, duration, thumbnail) {
 
   musicAudio.addEventListener("timeupdate", () => {
     if (isSeeking) return;
-    const cur = musicAudio.currentTime;
-    const total = duration || musicAudio.duration || 1;
+    const cur = musicAudio.currentTime,
+      total = duration || musicAudio.duration || 1;
     barFill.style.width = `${(cur / total) * 100}%`;
     seekInput.value = Math.floor(cur);
     elapsedEl.textContent = fmtTime(Math.floor(cur));
@@ -290,8 +471,7 @@ function createMusicPlayer(title, url, duration, thumbnail) {
   musicAudio.addEventListener("progress", () => {
     if (!musicAudio.buffered.length) return;
     const total = duration || musicAudio.duration || 1;
-    const buf = musicAudio.buffered.end(musicAudio.buffered.length - 1);
-    barBuffer.style.width = `${(buf / total) * 100}%`;
+    barBuffer.style.width = `${(musicAudio.buffered.end(musicAudio.buffered.length - 1) / total) * 100}%`;
   });
   seekInput.addEventListener("mousedown", () => {
     isSeeking = true;
@@ -305,8 +485,7 @@ function createMusicPlayer(title, url, duration, thumbnail) {
   );
   seekInput.addEventListener("input", () => {
     elapsedEl.textContent = fmtTime(Number(seekInput.value));
-    const total = duration || musicAudio.duration || 1;
-    barFill.style.width = `${(seekInput.value / total) * 100}%`;
+    barFill.style.width = `${(seekInput.value / (duration || musicAudio.duration || 1)) * 100}%`;
   });
   seekInput.addEventListener("change", () => {
     musicAudio.currentTime = Number(seekInput.value);
@@ -330,12 +509,12 @@ function createMusicPlayer(title, url, duration, thumbnail) {
   });
   mpMuteBtn.addEventListener("click", () => {
     if (_isMusicMuted) {
-      const restore = _volBeforeMute > 0 ? _volBeforeMute : 0.8;
-      musicAudio.volume = restore;
-      volSlider.value = Math.round(restore * 100);
-      volPct.textContent = `${Math.round(restore * 100)}%`;
+      const r = _volBeforeMute > 0 ? _volBeforeMute : 0.8;
+      musicAudio.volume = r;
+      volSlider.value = Math.round(r * 100);
+      volPct.textContent = `${Math.round(r * 100)}%`;
       _isMusicMuted = false;
-      _updateVolIcon(restore);
+      _updateVolIcon(r);
     } else {
       _volBeforeMute = musicAudio.volume;
       musicAudio.volume = 0;
@@ -349,7 +528,7 @@ function createMusicPlayer(title, url, duration, thumbnail) {
     musicAudio.playbackRate = parseFloat(e.target.value);
   });
   musicAudio.addEventListener("ended", () => {
-    if (ws && ws.readyState === WebSocket.OPEN)
+    if (ws?.readyState === WebSocket.OPEN)
       ws.send(JSON.stringify({ type: "music_ended" }));
     fetch("/music/stop", { method: "POST" }).catch(() => {});
     destroyMusicPlayer(false);
@@ -357,10 +536,7 @@ function createMusicPlayer(title, url, duration, thumbnail) {
   musicAudio.addEventListener("error", () => {
     if (!musicAudio) return;
     destroyMusicPlayer(false);
-    appendMessage(
-      "aria",
-      "❌ Audio playback error — the stream may have expired. Try playing again.",
-    );
+    appendMessage("aria", "❌ Audio playback error — try again.");
   });
   musicAudio.addEventListener("waiting", () =>
     _setMpStatus("⏳ BUFFERING", false),
@@ -375,24 +551,25 @@ function createMusicPlayer(title, url, duration, thumbnail) {
     console.warn("[Music] Autoplay blocked:", err);
     appendMessage(
       "aria",
-      "⚠ Browser blocked autoplay. Click anywhere on the page, then try again.",
+      "⚠ Browser blocked autoplay. Click anywhere then try again.",
     );
     destroyMusicPlayer(false);
   });
   window.addEventListener("beforeunload", _onPageUnload);
 }
 
-function _setMpStatus(text, isPlaying) {
+function _setMpStatus(text, playing) {
   const el = document.getElementById("mp-status");
-  if (!el) return;
-  el.textContent = text;
-  el.className = "mp-status" + (isPlaying ? " playing" : "");
+  if (el) {
+    el.textContent = text;
+    el.className = "mp-status" + (playing ? " playing" : "");
+  }
 }
 function _updateVolIcon(v) {
   const btn = document.getElementById("mp-mute-btn");
-  if (!btn) return;
-  btn.innerHTML =
-    v === 0 ? _svgVolOff() : v < 0.5 ? _svgVolLow() : _svgVolHigh();
+  if (btn)
+    btn.innerHTML =
+      v === 0 ? _svgVolOff() : v < 0.5 ? _svgVolLow() : _svgVolHigh();
 }
 function _svgVolHigh() {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`;
@@ -403,7 +580,8 @@ function _svgVolLow() {
 function _svgVolOff() {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`;
 }
-function destroyMusicPlayer(notifyBackend) {
+
+function destroyMusicPlayer(_) {
   musicPlaying = false;
   _isMusicMuted = false;
   if (musicAudio) {
@@ -458,7 +636,6 @@ function connect() {
     if (data.type === "typing") {
       showTyping();
     } else if (data.type === "aria") {
-      // Non-streamed push: welcome message, reminder fired, etc.
       hideTyping();
       appendMessage("aria", data.text);
       if (_ttsReady) speakChunk(stripMarkdown(data.text));
@@ -471,11 +648,13 @@ function connect() {
       streamBuffer += data.text;
       if (currentStreamEl) {
         currentStreamEl.innerHTML = formatText(streamBuffer);
+        addCopyButtons(currentStreamEl);
         scrollBottom();
       }
       if (!data.no_tts && !musicPlaying) _flushSentences(data.text, false);
     } else if (data.type === "stream_end") {
       if (currentStreamEl) {
+        addCopyButtons(currentStreamEl);
         const timeEl = document.createElement("div");
         timeEl.className = "msg-time";
         timeEl.textContent = new Date().toLocaleTimeString([], {
@@ -487,6 +666,10 @@ function connect() {
         currentStreamEl = null;
         streamBuffer = "";
       }
+    } else if (data.type === "file_image") {
+      // Inline image from upload
+      hideTyping();
+      appendImageMessage(data.name, data.b64, data.mime, data.caption);
     } else if (data.type === "music_play") {
       stopSpeaking();
       createMusicPlayer(data.title, data.url, data.duration, data.thumbnail);
@@ -497,7 +680,7 @@ function connect() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Send
+// Send — with file upload awareness
 // ─────────────────────────────────────────────────────────────────────────────
 
 function send(text) {
@@ -505,8 +688,31 @@ function send(text) {
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
   _ttsReady = true;
   stopSpeaking();
-  appendMessage("user", text);
-  ws.send(JSON.stringify({ text }));
+
+  if (_pendingFile) {
+    // Send file question over WS
+    appendMessage("user", `📎 **${_pendingFile.name}** — ${text}`);
+    ws.send(
+      JSON.stringify({
+        type: "file_ask",
+        file: _pendingFile,
+        question: text,
+      }),
+    );
+    _pendingFile = null;
+    // Remove upload indicator bubble
+    const msgs = chat.querySelectorAll(".msg.user .msg-body");
+    for (const m of msgs) {
+      if (m.querySelector("button[onclick='clearPendingFile()']")) {
+        m.closest(".msg").remove();
+        break;
+      }
+    }
+  } else {
+    appendMessage("user", text);
+    ws.send(JSON.stringify({ text }));
+  }
+
   input.value = "";
   input.focus();
 }
@@ -529,11 +735,10 @@ document.querySelectorAll(".qcmd").forEach((btn) => {
 const SpeechRecognition =
   window.SpeechRecognition || window.webkitSpeechRecognition;
 const hasSTT = !!SpeechRecognition;
-let wakeRecognizer = null;
-let activeRecognizer = null;
-let isListeningActive = false;
-let wakeEnabled = hasSTT;
-
+let wakeRecognizer = null,
+  activeRecognizer = null,
+  isListeningActive = false,
+  wakeEnabled = hasSTT;
 const WAKE_WORD = "hey aria";
 const WAKE_ALTS = ["hey area", "hay aria", "hey arya", "hi aria", "aria"];
 
@@ -553,7 +758,7 @@ function startWakeListener() {
   wakeRecognizer.maxAlternatives = 3;
   wakeRecognizer.onstart = () => micBtn.classList.add("wake-active");
   wakeRecognizer.onresult = (event) => {
-    for (let i = event.resultIndex; i < event.results.length; i++) {
+    for (let i = event.resultIndex; i < event.results.length; i++)
       for (let a = 0; a < event.results[i].length; a++) {
         const alt = event.results[i][a].transcript.toLowerCase().trim();
         if (alt.includes(WAKE_WORD) || WAKE_ALTS.some((w) => alt.includes(w))) {
@@ -562,7 +767,6 @@ function startWakeListener() {
           return;
         }
       }
-    }
   };
   wakeRecognizer.onerror = () => {};
   wakeRecognizer.onend = () => {
@@ -658,8 +862,8 @@ micBtn.addEventListener("click", () => {
 function playBeep(freq = 880, duration = 80) {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+    const osc = ctx.createOscillator(),
+      gain = ctx.createGain();
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.frequency.value = freq;
@@ -693,6 +897,30 @@ function appendMessage(role, text) {
       <div class="msg-time">${now}</div>
     </div>`;
   chat.appendChild(el);
+  if (role === "aria") addCopyButtons(el.querySelector(".msg-body"));
+  scrollBottom();
+}
+
+function appendImageMessage(name, b64, mime, caption) {
+  const now = new Date().toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const el = document.createElement("div");
+  el.className = "msg aria";
+  el.innerHTML = `
+    <div class="msg-avatar">AR</div>
+    <div>
+      <div class="msg-body" style="padding:8px">
+        <img src="data:${escHtml(mime)};base64,${b64}"
+             alt="${escHtml(name)}"
+             style="max-width:100%;max-height:320px;border-radius:2px;
+                    border:1px solid var(--border);display:block;margin-bottom:6px">
+        ${caption ? `<div style="font-size:.82rem;color:var(--text-dim)">${formatText(caption)}</div>` : ""}
+      </div>
+      <div class="msg-time">${now}</div>
+    </div>`;
+  chat.appendChild(el);
   scrollBottom();
 }
 
@@ -712,7 +940,8 @@ function showTyping() {
   if (typingEl) return;
   typingEl = document.createElement("div");
   typingEl.className = "msg aria";
-  typingEl.innerHTML = `<div class="msg-avatar">AR</div><div class="msg-body typing-indicator"><span></span><span></span><span></span></div>`;
+  typingEl.innerHTML = `<div class="msg-avatar">AR</div>
+    <div class="msg-body typing-indicator"><span></span><span></span><span></span></div>`;
   chat.appendChild(typingEl);
   scrollBottom();
 }
@@ -779,16 +1008,52 @@ function stripMarkdown(raw) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Copy-button CSS (injected once)
+// ─────────────────────────────────────────────────────────────────────────────
+
+(function injectCopyBtnStyles() {
+  const s = document.createElement("style");
+  s.textContent = `
+    .copy-btn {
+      position: absolute; top: 6px; right: 6px;
+      background: var(--panel); border: 1px solid var(--border);
+      color: var(--text-dim); font-family: "Share Tech Mono", monospace;
+      font-size: .65rem; padding: 2px 8px; cursor: pointer;
+      border-radius: 2px; opacity: 0;
+      transition: opacity .15s, border-color .15s, color .15s;
+    }
+    pre:hover .copy-btn { opacity: 1; }
+    .copy-btn:hover { border-color: var(--accent2); color: var(--accent); }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  `;
+  document.head.appendChild(s);
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Boot
 // ─────────────────────────────────────────────────────────────────────────────
 
-connect();
-
-initTTS().then(() => {
-  if (hasSTT) {
-    setTimeout(() => {
-      startWakeListener();
-      setVoiceStatus('👂 Listening for "Hey ARIA"...', 3000);
-    }, 1200);
+// Keyboard shortcuts
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+    e.preventDefault();
+    input.focus();
   }
+  if (e.key === "Escape") stopSpeaking();
+  if ((e.ctrlKey || e.metaKey) && e.key === "m") {
+    e.preventDefault();
+    muteBtn.click();
+  }
+});
+
+loadPrefs().then(() => {
+  injectUploadButton();
+  connect();
+  initTTS().then(() => {
+    if (hasSTT)
+      setTimeout(() => {
+        startWakeListener();
+        setVoiceStatus('👂 Listening for "Hey ARIA"...', 3000);
+      }, 1200);
+  });
 });

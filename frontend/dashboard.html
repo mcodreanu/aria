@@ -1,0 +1,759 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ARIA — Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <style>
+      html,
+      body {
+        overflow: auto;
+      }
+
+      #dash {
+        position: relative;
+        z-index: 1;
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 0 16px 60px;
+      }
+
+      /* ── Header ── */
+      .dash-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px 0 18px;
+        border-bottom: 1px solid var(--border);
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .dash-header h2 {
+        font-family: "Orbitron", sans-serif;
+        font-size: 1.1rem;
+        font-weight: 700;
+        letter-spacing: 0.15em;
+        color: var(--accent);
+        text-shadow: 0 0 16px var(--accent);
+      }
+      .dash-nav {
+        display: flex;
+        gap: 8px;
+      }
+      .dash-nav a {
+        font-size: 0.72rem;
+        color: var(--text-dim);
+        text-decoration: none;
+        border: 1px solid var(--border);
+        padding: 4px 12px;
+        border-radius: 2px;
+        transition:
+          border-color 0.2s,
+          color 0.2s;
+      }
+      .dash-nav a:hover {
+        border-color: var(--accent2);
+        color: var(--accent);
+      }
+
+      /* ── Grid ── */
+      .dash-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 16px;
+        margin-top: 20px;
+      }
+
+      /* ── Card ── */
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 2px;
+        padding: 16px 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .card-title {
+        font-family: "Orbitron", sans-serif;
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        color: var(--accent2);
+        text-transform: uppercase;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .card-title .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 6px var(--accent);
+      }
+
+      /* ── Status pill ── */
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.72rem;
+        padding: 3px 10px;
+        border-radius: 2px;
+        border: 1px solid var(--border);
+      }
+      .pill.ok {
+        border-color: var(--success);
+        color: var(--success);
+      }
+      .pill.warn {
+        border-color: #ffaa00;
+        color: #ffaa00;
+      }
+      .pill.err {
+        border-color: var(--danger);
+        color: var(--danger);
+      }
+
+      /* ── Stat row ── */
+      .stat-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.8rem;
+        color: var(--text-dim);
+        border-bottom: 1px solid rgba(13, 48, 96, 0.4);
+        padding-bottom: 6px;
+      }
+      .stat-row:last-child {
+        border-bottom: none;
+        padding-bottom: 0;
+      }
+      .stat-row strong {
+        color: var(--text);
+      }
+
+      /* ── Bar ── */
+      .bar-wrap {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.72rem;
+        color: var(--text-dim);
+      }
+      .bar-bg {
+        flex: 1;
+        height: 6px;
+        background: var(--border);
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .bar-fill {
+        height: 100%;
+        border-radius: 3px;
+        background: var(--accent);
+        box-shadow: 0 0 8px var(--accent);
+        transition: width 0.6s ease;
+      }
+      .bar-fill.warn {
+        background: #ffaa00;
+        box-shadow: 0 0 8px #ffaa00;
+      }
+      .bar-fill.err {
+        background: var(--danger);
+        box-shadow: 0 0 8px var(--danger);
+      }
+
+      /* ── Chart ── */
+      .chart-wrap {
+        position: relative;
+        height: 120px;
+      }
+      canvas.chart {
+        width: 100% !important;
+        height: 100% !important;
+      }
+
+      /* ── Model switcher ── */
+      .model-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .model-row select {
+        flex: 1;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 2px;
+        color: var(--text);
+        font-family: "Share Tech Mono", monospace;
+        font-size: 0.82rem;
+        padding: 6px 10px;
+        outline: none;
+        transition: border-color 0.2s;
+      }
+      .model-row select:focus {
+        border-color: var(--accent2);
+      }
+      .model-row button {
+        background: transparent;
+        border: 1px solid var(--accent);
+        color: var(--accent);
+        font-family: "Orbitron", sans-serif;
+        font-size: 0.62rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        padding: 6px 14px;
+        cursor: pointer;
+        border-radius: 2px;
+        transition: background 0.2s;
+      }
+      .model-row button:hover {
+        background: var(--glow);
+      }
+
+      /* ── Prefs form ── */
+      .pref-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 0.8rem;
+        color: var(--text-dim);
+        border-bottom: 1px solid rgba(13, 48, 96, 0.4);
+        padding-bottom: 8px;
+      }
+      .pref-row:last-child {
+        border-bottom: none;
+        padding-bottom: 0;
+      }
+      .pref-row label {
+        color: var(--text);
+      }
+      .pref-row input[type="range"] {
+        width: 100px;
+        accent-color: var(--accent);
+      }
+      .pref-row select {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text);
+        font-family: "Share Tech Mono", monospace;
+        font-size: 0.78rem;
+        padding: 3px 8px;
+        border-radius: 2px;
+        outline: none;
+      }
+      .toggle {
+        position: relative;
+        width: 36px;
+        height: 20px;
+      }
+      .toggle input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .toggle-slider {
+        position: absolute;
+        inset: 0;
+        background: var(--border);
+        border-radius: 20px;
+        cursor: pointer;
+        transition: 0.3s;
+      }
+      .toggle-slider::before {
+        content: "";
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        left: 3px;
+        bottom: 3px;
+        background: var(--text-dim);
+        border-radius: 50%;
+        transition: 0.3s;
+      }
+      .toggle input:checked + .toggle-slider {
+        background: var(--accent);
+      }
+      .toggle input:checked + .toggle-slider::before {
+        transform: translateX(16px);
+        background: #000;
+      }
+
+      /* ── Full-width card ── */
+      .card.full {
+        grid-column: 1 / -1;
+      }
+
+      /* ── Loading shimmer ── */
+      .shimmer {
+        background: linear-gradient(
+          90deg,
+          var(--border) 25%,
+          rgba(0, 212, 255, 0.07) 50%,
+          var(--border) 75%
+        );
+        background-size: 200% 100%;
+        animation: shimmer 1.4s infinite;
+        border-radius: 2px;
+        height: 14px;
+      }
+      @keyframes shimmer {
+        to {
+          background-position: -200% 0;
+        }
+      }
+
+      .refresh-btn {
+        margin-left: auto;
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        font-family: "Share Tech Mono", monospace;
+        font-size: 0.68rem;
+        padding: 3px 10px;
+        cursor: pointer;
+        border-radius: 2px;
+        transition:
+          border-color 0.2s,
+          color 0.2s;
+      }
+      .refresh-btn:hover {
+        border-color: var(--accent2);
+        color: var(--accent);
+      }
+
+      .save-banner {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--panel);
+        border: 1px solid var(--accent);
+        color: var(--accent);
+        font-size: 0.78rem;
+        padding: 8px 20px;
+        border-radius: 2px;
+        box-shadow: 0 0 20px var(--glow);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s;
+      }
+      .save-banner.show {
+        opacity: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="dash">
+      <header class="dash-header">
+        <h2>⚡ ARIA DASHBOARD</h2>
+        <nav class="dash-nav">
+          <a href="/">← Chat</a>
+          <a href="/history">📜 History</a>
+          <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+        </nav>
+      </header>
+
+      <div class="dash-grid">
+        <!-- ── Services ── -->
+        <div class="card" id="card-services">
+          <div class="card-title">
+            <div class="dot"></div>
+            Services
+          </div>
+          <div id="services-body"><div class="shimmer"></div></div>
+        </div>
+
+        <!-- ── System Resources ── -->
+        <div class="card" id="card-sys">
+          <div class="card-title">
+            <div class="dot"></div>
+            System Resources
+          </div>
+          <div id="sys-body"><div class="shimmer"></div></div>
+        </div>
+
+        <!-- ── Ollama ── -->
+        <div class="card" id="card-ollama">
+          <div class="card-title">
+            <div class="dot"></div>
+            Ollama / LLM
+          </div>
+          <div id="ollama-body"><div class="shimmer"></div></div>
+        </div>
+
+        <!-- ── Preferences ── -->
+        <div class="card" id="card-prefs">
+          <div class="card-title">
+            <div class="dot"></div>
+            Preferences
+          </div>
+          <div id="prefs-body"><div class="shimmer"></div></div>
+        </div>
+
+        <!-- ── Conversation Stats (full width) ── -->
+        <div class="card full" id="card-stats">
+          <div class="card-title">
+            <div class="dot"></div>
+            Conversation Activity
+          </div>
+          <div id="stats-body"><div class="shimmer"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="save-banner" id="save-banner">✓ Preferences saved</div>
+
+    <script>
+      // ── Helpers ──────────────────────────────────────────────────────────────────
+
+      function pill(ok, label) {
+        const cls = ok === true ? "ok" : ok === false ? "err" : "warn";
+        const dot = ok === true ? "●" : ok === false ? "●" : "●";
+        return `<span class="pill ${cls}">${dot} ${label}</span>`;
+      }
+
+      function statRow(label, value) {
+        return `<div class="stat-row"><span>${label}</span><strong>${value}</strong></div>`;
+      }
+
+      function barRow(label, pct, val) {
+        const cls = pct > 90 ? "err" : pct > 70 ? "warn" : "";
+        return `
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--text-dim)">
+        <span>${label}</span><span>${val}</span>
+      </div>
+      <div class="bar-bg">
+        <div class="bar-fill ${cls}" style="width:${pct}%"></div>
+      </div>
+    </div>`;
+      }
+
+      function showBanner() {
+        const b = document.getElementById("save-banner");
+        b.classList.add("show");
+        setTimeout(() => b.classList.remove("show"), 2000);
+      }
+
+      // ── Services card ────────────────────────────────────────────────────────────
+
+      async function loadServices() {
+        try {
+          const r = await fetch("/health");
+          const d = await r.json();
+          document.getElementById("services-body").innerHTML = `
+      <div style="display:flex;flex-wrap:wrap;gap:8px">
+        ${pill(true, "ARIA Online")}
+        ${pill(d.llm !== "unavailable", d.llm !== "unavailable" ? `LLM: ${d.llm}` : "LLM Offline")}
+        ${pill(d.tts === "kokoro", d.tts === "kokoro" ? "Kokoro TTS" : "TTS: Browser")}
+        ${pill(d.music, d.music ? "Music Ready" : "yt-dlp Missing")}
+        ${pill(d.scheduler, d.scheduler ? "Scheduler" : "APScheduler Missing")}
+      </div>
+      <div style="margin-top:8px">
+        ${statRow("Active sessions", d.active_sessions)}
+        ${statRow("Total conversations", d.total_conversations)}
+        ${statRow("Total messages", d.total_messages)}
+        ${d.now_playing ? statRow("Now playing", `🎵 ${d.now_playing}`) : ""}
+      </div>`;
+        } catch (e) {
+          document.getElementById("services-body").innerHTML =
+            `<span style="color:var(--danger)">Could not reach /health</span>`;
+        }
+      }
+
+      // ── System resources card ────────────────────────────────────────────────────
+
+      async function loadSysInfo() {
+        try {
+          const r = await fetch("/dashboard/sysinfo");
+          const d = await r.json();
+          document.getElementById("sys-body").innerHTML = `
+      ${barRow("CPU", d.cpu_pct, `${d.cpu_pct}%`)}
+      ${barRow("RAM", d.ram_pct, `${d.ram_used_gb} / ${d.ram_total_gb} GB`)}
+      ${barRow("Disk", d.disk_pct, `${d.disk_used_gb} / ${d.disk_total_gb} GB`)}
+      <div style="margin-top:8px">
+        ${statRow("OS", d.os)}
+        ${statRow("Python", d.python)}
+        ${statRow("Uptime", d.uptime)}
+      </div>`;
+        } catch {
+          document.getElementById("sys-body").innerHTML =
+            `<span style="color:var(--text-dim)">psutil not installed — <code>pip install psutil</code></span>`;
+        }
+      }
+
+      // ── Ollama card ──────────────────────────────────────────────────────────────
+
+      async function loadOllama() {
+        try {
+          const r = await fetch("/ollama/status");
+          const d = await r.json();
+          const body = document.getElementById("ollama-body");
+          if (!d.available) {
+            body.innerHTML = `
+        ${pill(false, "Ollama Offline")}
+        <div style="font-size:.76rem;color:var(--text-dim);margin-top:8px">
+          Install at <a href="https://ollama.com/download" target="_blank"
+          style="color:var(--accent)">ollama.com/download</a>, then pull a model.
+        </div>`;
+            return;
+          }
+          body.innerHTML = `
+      ${pill(true, "Ollama Online")}
+      <div style="font-size:.76rem;color:var(--text-dim)">Active model:</div>
+      <div class="model-row">
+        <select id="model-select">
+          ${d.models
+            .map(
+              (m) =>
+                `<option value="${m}" ${m === d.model ? "selected" : ""}>${m}</option>`,
+            )
+            .join("")}
+        </select>
+        <button onclick="switchModel()">APPLY</button>
+      </div>
+      <div style="font-size:.7rem;color:var(--text-dim)">
+        ${d.models.length} model${d.models.length !== 1 ? "s" : ""} pulled locally
+      </div>`;
+        } catch {
+          document.getElementById("ollama-body").innerHTML = pill(
+            false,
+            "Ollama Unreachable",
+          );
+        }
+      }
+
+      async function switchModel() {
+        const sel = document.getElementById("model-select");
+        if (!sel) return;
+        try {
+          await fetch("/prefs", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ollama_model: sel.value }),
+          });
+          showBanner();
+        } catch (e) {
+          alert("Failed to switch model: " + e);
+        }
+      }
+
+      // ── Preferences card ─────────────────────────────────────────────────────────
+
+      const VOICES = [
+        "af_heart",
+        "af_bella",
+        "af_sarah",
+        "af_nicole",
+        "af_sky",
+        "bf_emma",
+        "bf_isabella",
+      ];
+
+      async function loadPrefs() {
+        try {
+          const r = await fetch("/prefs");
+          const p = await r.json();
+          document.getElementById("prefs-body").innerHTML = `
+      <div class="pref-row">
+        <label>Mute TTS</label>
+        <label class="toggle">
+          <input type="checkbox" id="pref-muted" ${p.muted ? "checked" : ""}
+                 onchange="savePref('muted', this.checked)">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="pref-row">
+        <label>TTS Voice</label>
+        <select id="pref-voice" onchange="savePref('tts_voice', this.value)">
+          ${VOICES.map(
+            (v) =>
+              `<option value="${v}" ${v === p.tts_voice ? "selected" : ""}>${v}</option>`,
+          ).join("")}
+        </select>
+      </div>
+      <div class="pref-row">
+        <label>TTS Speed <span id="speed-val">${p.tts_speed}×</span></label>
+        <input type="range" id="pref-speed" min="0.5" max="2" step="0.25"
+               value="${p.tts_speed}"
+               oninput="document.getElementById('speed-val').textContent=this.value+'×'"
+               onchange="savePref('tts_speed', parseFloat(this.value))">
+      </div>
+      <div class="pref-row">
+        <label>Theme</label>
+        <select id="pref-theme" onchange="savePref('theme', this.value)">
+          <option value="dark"  ${p.theme === "dark" ? "selected" : ""}>Dark</option>
+          <option value="light" ${p.theme === "light" ? "selected" : ""}>Light</option>
+        </select>
+      </div>
+      <div class="pref-row" style="border-top:1px solid rgba(13,48,96,.4);padding-top:8px;margin-top:4px">
+        <label style="color:var(--text-dim)">Reset all to defaults</label>
+        <button onclick="resetPrefs()"
+          style="background:transparent;border:1px solid var(--danger);
+                 color:var(--danger);font-size:.68rem;padding:4px 10px;
+                 cursor:pointer;border-radius:2px;font-family:'Share Tech Mono',monospace">
+          RESET
+        </button>
+      </div>`;
+        } catch (e) {
+          document.getElementById("prefs-body").innerHTML =
+            `<span style="color:var(--danger)">Could not load preferences</span>`;
+        }
+      }
+
+      async function savePref(key, value) {
+        try {
+          await fetch("/prefs", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ [key]: value }),
+          });
+          showBanner();
+        } catch (e) {
+          console.error("Pref save failed:", e);
+        }
+      }
+
+      async function resetPrefs() {
+        if (!confirm("Reset all preferences to defaults?")) return;
+        await fetch("/prefs/reset", { method: "POST" });
+        showBanner();
+        loadPrefs();
+      }
+
+      // ── Conversation stats card ───────────────────────────────────────────────────
+
+      async function loadStats() {
+        try {
+          const [statsR, sessR] = await Promise.all([
+            fetch("/history/stats"),
+            fetch("/history/sessions?limit=30"),
+          ]);
+          const stats = await statsR.json();
+          const sess = await sessR.json();
+
+          // Build daily message counts for the chart (last 14 days)
+          const days = 14;
+          const counts = new Array(days).fill(0);
+          const labels = [];
+          const now = new Date();
+          for (let i = days - 1; i >= 0; i--) {
+            const d = new Date(now);
+            d.setDate(d.getDate() - i);
+            labels.push(
+              d.toLocaleDateString([], { month: "short", day: "numeric" }),
+            );
+          }
+          (sess.sessions || []).forEach((s) => {
+            const d = new Date(s.started_at * 1000);
+            const ago = Math.floor((now - d) / 86400000);
+            if (ago < days) counts[days - 1 - ago] += s.msg_count || 0;
+          });
+
+          document.getElementById("stats-body").innerHTML = `
+      <div style="display:flex;gap:32px;flex-wrap:wrap;margin-bottom:12px">
+        ${statRow("Total sessions", stats.total_sessions ?? 0)}
+        ${statRow("Total messages", stats.total_messages ?? 0)}
+        ${statRow(
+          "Oldest message",
+          stats.oldest_ts
+            ? new Date(stats.oldest_ts * 1000).toLocaleDateString()
+            : "—",
+        )}
+      </div>
+      <div class="chart-wrap">
+        <canvas id="msg-chart" class="chart"></canvas>
+      </div>`;
+
+          drawChart(labels, counts);
+        } catch (e) {
+          document.getElementById("stats-body").innerHTML =
+            `<span style="color:var(--text-dim)">Stats unavailable</span>`;
+        }
+      }
+
+      function drawChart(labels, data) {
+        const canvas = document.getElementById("msg-chart");
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const W = canvas.offsetWidth || 600;
+        const H = canvas.offsetHeight || 120;
+        canvas.width = W;
+        canvas.height = H;
+
+        const max = Math.max(...data, 1);
+        const pad = { t: 10, r: 10, b: 28, l: 30 };
+        const bw = (W - pad.l - pad.r) / labels.length;
+        const accent = "#00d4ff";
+        const dim = "#4a7a9b";
+
+        ctx.clearRect(0, 0, W, H);
+
+        // Grid lines
+        ctx.strokeStyle = "rgba(13,48,96,.5)";
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 4; i++) {
+          const y = pad.t + ((H - pad.t - pad.b) * i) / 4;
+          ctx.beginPath();
+          ctx.moveTo(pad.l, y);
+          ctx.lineTo(W - pad.r, y);
+          ctx.stroke();
+        }
+
+        // Bars
+        data.forEach((v, i) => {
+          const bh = ((H - pad.t - pad.b) * v) / max;
+          const x = pad.l + i * bw + bw * 0.15;
+          const y = H - pad.b - bh;
+          const w = bw * 0.7;
+
+          // Glow
+          ctx.shadowColor = accent;
+          ctx.shadowBlur = 8;
+          ctx.fillStyle = accent;
+          ctx.fillRect(x, y, w, bh);
+          ctx.shadowBlur = 0;
+
+          // Label every 2nd bar
+          if (i % 2 === 0) {
+            ctx.fillStyle = dim;
+            ctx.font = `10px "Share Tech Mono", monospace`;
+            ctx.textAlign = "center";
+            ctx.fillText(labels[i], x + w / 2, H - 4);
+          }
+        });
+
+        // Y-axis labels
+        ctx.fillStyle = dim;
+        ctx.font = `10px "Share Tech Mono", monospace`;
+        ctx.textAlign = "right";
+        for (let i = 0; i <= 2; i++) {
+          const v = Math.round((max * (2 - i)) / 2);
+          const y = pad.t + ((H - pad.t - pad.b) * i) / 2;
+          ctx.fillText(v, pad.l - 4, y + 4);
+        }
+      }
+
+      // ── Boot ─────────────────────────────────────────────────────────────────────
+
+      function loadAll() {
+        loadServices();
+        loadSysInfo();
+        loadOllama();
+        loadPrefs();
+        loadStats();
+      }
+
+      loadAll();
+      // Auto-refresh every 30 seconds
+      setInterval(() => {
+        loadServices();
+        loadSysInfo();
+      }, 30000);
+    </script>
+  </body>
+</html>

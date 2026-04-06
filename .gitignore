@@ -39,6 +39,18 @@ aria_screenshots/
 # Music temp files
 aria_music/
 
+# Calendar export — contains personal events, regenerates automatically
+aria_calendar.ics
+
+# Temporary files for uploads — contains personal data, regenerates automatically
+aria_uploads/
+
+# User preferences — contains personal data, regenerates automatically
+aria_prefs.json
+
+# Other
+data/
+
 # ── Environment & secrets ─────────────────────────────────────────────────────
 .env
 .env.local

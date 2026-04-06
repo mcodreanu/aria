@@ -11,7 +11,7 @@ import httpx
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +23,9 @@ import ollama as ollama_engine
 import sysinfo.tts as tts_engine
 import sysinfo.music as music_engine
 import sysinfo.scheduler as scheduler_engine
+import sysinfo.prefs as prefs_engine
 from sysinfo.conversations import store as conv_store
+from sysinfo.files_upload import save_upload, handle_file_question, handle_file_transform, cleanup_old_uploads
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aria")
@@ -53,7 +55,6 @@ def _prune_sessions():
 # ── Scheduler push callback ───────────────────────────────────────────────────
 
 async def _scheduler_push(conv_session_id, text: str):
-    """Called by the scheduler when a reminder fires. Sends a WS message."""
     ws = _ws_connections.get(conv_session_id)
     if not ws:
         logger.info(f"[Scheduler] No active WS for session {conv_session_id}, reminder dropped.")
@@ -66,34 +67,44 @@ async def _scheduler_push(conv_session_id, text: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # TTS
+    # TTS — apply saved preferences
+    saved_prefs = prefs_engine.get_all()
+    if saved_prefs.get("tts_voice"):
+        tts_engine.ARIA_VOICE = saved_prefs["tts_voice"]
+    if saved_prefs.get("tts_speed"):
+        tts_engine.ARIA_SPEED = float(saved_prefs["tts_speed"])
+
     if tts_engine.is_available():
         logger.info("Preloading Kokoro TTS engine...")
         await asyncio.get_event_loop().run_in_executor(None, tts_engine.preload)
     else:
         logger.warning("kokoro-onnx not found — install: pip install kokoro-onnx soundfile")
 
-    # Ollama
+    # Ollama — apply saved model preference
+    saved_model = saved_prefs.get("ollama_model")
+    if saved_model:
+        ollama_engine.OLLAMA_MODEL = saved_model
+
     if ollama_engine.is_available():
         models = ollama_engine.list_models()
         active = ollama_engine.active_model()
         logger.info(f"Ollama online — active: {active} | pulled: {', '.join(models) or 'none'}")
-        if active not in " ".join(models):
-            logger.warning(f"Model '{active}' not pulled. Run: ollama pull {active}")
     else:
         logger.warning("Ollama not reachable — install: https://ollama.com/download")
 
-    # Music
     if music_engine.is_available():
         logger.info("yt-dlp detected — music playback enabled.")
     else:
         logger.warning("yt-dlp not installed — music disabled. Run: pip install yt-dlp")
 
-    # Scheduler — pass a shared Memory-like object for persistence
     _shared_memory = Memory()
     scheduler_engine.init(_scheduler_push, _shared_memory)
 
+    # Clean up old uploads on startup
+    await asyncio.get_event_loop().run_in_executor(None, cleanup_old_uploads)
+
     logger.info(f"Conversation history DB: {conv_store._db_path}")
+    logger.info(f"Preferences file: {prefs_engine.PREFS_FILE}")
 
     yield
 
@@ -118,22 +129,143 @@ async def index():
 async def history_page():
     return FileResponse(str(FRONTEND / "history.html"))
 
+@app.get("/dashboard")
+async def dashboard_page():
+    return FileResponse(str(FRONTEND / "dashboard.html"))
+
 @app.get("/health")
 async def health():
     ollama_up = ollama_engine.is_available()
-    track = music_engine.current_track()
-    stats = conv_store.stats()
+    track     = music_engine.current_track()
+    stats     = conv_store.stats()
     return JSONResponse({
-        "status": "online", "name": "ARIA",
-        "tts": "kokoro" if tts_engine.is_available() else "browser-fallback",
-        "llm": ollama_engine.active_model() if ollama_up else "unavailable",
-        "music": music_engine.is_available(),
-        "now_playing": track["title"] if track else None,
-        "scheduler": scheduler_engine.is_available(),
-        "active_sessions": len(sessions),
-        "total_conversations": stats.get("total_sessions", 0),
-        "total_messages": stats.get("total_messages", 0),
+        "status":               "online",
+        "name":                 "ARIA",
+        "tts":                  "kokoro" if tts_engine.is_available() else "browser-fallback",
+        "llm":                  ollama_engine.active_model() if ollama_up else "unavailable",
+        "music":                music_engine.is_available(),
+        "now_playing":          track["title"] if track else None,
+        "scheduler":            scheduler_engine.is_available(),
+        "active_sessions":      len(sessions),
+        "total_conversations":  stats.get("total_sessions", 0),
+        "total_messages":       stats.get("total_messages", 0),
     })
+
+
+# ── Dashboard sysinfo endpoint ────────────────────────────────────────────────
+
+@app.get("/dashboard/sysinfo")
+async def dashboard_sysinfo():
+    try:
+        import psutil, platform, datetime
+        cpu     = psutil.cpu_percent(interval=0.2)
+        ram     = psutil.virtual_memory()
+        disk    = psutil.disk_usage("/")
+        boot_ts = psutil.boot_time()
+        uptime  = str(datetime.timedelta(seconds=int(time.time() - boot_ts)))
+        return JSONResponse({
+            "cpu_pct":      round(cpu, 1),
+            "ram_pct":      round(ram.percent, 1),
+            "ram_used_gb":  round(ram.used / 1e9, 1),
+            "ram_total_gb": round(ram.total / 1e9, 1),
+            "disk_pct":     round(disk.percent, 1),
+            "disk_used_gb": round(disk.used / 1e9, 1),
+            "disk_total_gb":round(disk.total / 1e9, 1),
+            "os":           f"{platform.system()} {platform.release()}",
+            "python":       platform.python_version(),
+            "uptime":       uptime,
+        })
+    except ImportError:
+        raise HTTPException(status_code=503, detail="psutil not installed")
+
+
+# ── Preferences API ───────────────────────────────────────────────────────────
+
+@app.get("/prefs")
+async def get_prefs():
+    return JSONResponse(prefs_engine.get_all())
+
+@app.patch("/prefs")
+async def update_prefs(request: Request):
+    body = await request.json()
+    try:
+        updated = prefs_engine.update(body)
+        # Apply model change immediately if provided
+        if "ollama_model" in body:
+            ollama_engine.OLLAMA_MODEL = body["ollama_model"]
+        # Apply TTS changes immediately if provided
+        if "tts_voice" in body:
+            tts_engine.ARIA_VOICE = body["tts_voice"]
+        if "tts_speed" in body:
+            tts_engine.ARIA_SPEED = float(body["tts_speed"])
+        return JSONResponse(updated)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/prefs/reset")
+async def reset_prefs():
+    return JSONResponse(prefs_engine.reset())
+
+
+# ── File upload API ───────────────────────────────────────────────────────────
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """Receive a file upload, save it, return metadata."""
+    content = await file.read()
+    if len(content) > 20 * 1024 * 1024:  # 20MB limit
+        raise HTTPException(status_code=413, detail="File too large (max 20MB)")
+    meta = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: save_upload(file.filename or "upload", content)
+    )
+    return JSONResponse(meta)
+
+class FileQuestionRequest(BaseModel):
+    file_id: str
+    filename: str
+    mime: str
+    question: str = ""
+
+@app.post("/upload/ask")
+async def ask_about_file(req: FileQuestionRequest):
+    """Ask a question about a previously uploaded file."""
+    from sysinfo.files_upload import UPLOAD_DIR
+    import glob
+    matches = list(UPLOAD_DIR.glob(f"{req.file_id}_*"))
+    if not matches:
+        raise HTTPException(status_code=404, detail="File not found")
+    meta = {"path": str(matches[0]), "name": req.filename, "mime": req.mime}
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: handle_file_question(meta, req.question)
+    )
+    return JSONResponse(result)
+
+class FileTransformRequest(BaseModel):
+    file_id:     str
+    filename:    str
+    mime:        str
+    instruction: str
+
+@app.post("/upload/transform")
+async def transform_file(req: FileTransformRequest):
+    """Transform a file according to an instruction and return download."""
+    from sysinfo.files_upload import UPLOAD_DIR
+    matches = list(UPLOAD_DIR.glob(f"{req.file_id}_*"))
+    if not matches:
+        raise HTTPException(status_code=404, detail="File not found")
+    meta   = {"path": str(matches[0]), "name": req.filename, "mime": req.mime}
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: handle_file_transform(meta, req.instruction)
+    )
+    return JSONResponse(result)
+
+@app.get("/upload/download/{filename}")
+async def download_transformed(filename: str):
+    from sysinfo.files_upload import UPLOAD_DIR
+    path = UPLOAD_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(path), filename=filename)
 
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
@@ -143,8 +275,8 @@ async def tts_status():
     return JSONResponse({"available": tts_engine.is_available()})
 
 class TTSRequest(BaseModel):
-    text: str
-    voice: str = tts_engine.ARIA_VOICE
+    text:  str
+    voice: str   = tts_engine.ARIA_VOICE
     speed: float = tts_engine.ARIA_SPEED
 
 @app.post("/tts")
@@ -153,9 +285,12 @@ async def text_to_speech(req: TTSRequest):
         raise HTTPException(status_code=503, detail="TTS engine not available")
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Empty text")
+    # Use current runtime prefs as fallback
+    voice = req.voice or tts_engine.ARIA_VOICE
+    speed = req.speed or tts_engine.ARIA_SPEED
     try:
         wav_bytes = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: tts_engine.synthesize(req.text, req.voice, req.speed)
+            None, lambda: tts_engine.synthesize(req.text, voice, speed)
         )
         return Response(content=wav_bytes, media_type="audio/wav",
                         headers={"Cache-Control": "no-cache"})
@@ -171,8 +306,8 @@ async def ollama_status():
     available = ollama_engine.is_available()
     return JSONResponse({
         "available": available,
-        "model": ollama_engine.active_model() if available else None,
-        "models": ollama_engine.list_models() if available else [],
+        "model":     ollama_engine.active_model() if available else None,
+        "models":    ollama_engine.list_models()  if available else [],
     })
 
 @app.get("/ollama/models")
@@ -208,9 +343,9 @@ async def music_stream_proxy(stream_id: str, request: Request):
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as probe:
         head = await probe.head(fresh_url, headers={"User-Agent": "Mozilla/5.0"})
 
-    content_type   = head.headers.get("content-type", "audio/webm")
-    content_length = head.headers.get("content-length")
-    accept_ranges  = head.headers.get("accept-ranges", "bytes")
+    content_type    = head.headers.get("content-type", "audio/webm")
+    content_length  = head.headers.get("content-length")
+    accept_ranges   = head.headers.get("accept-ranges", "bytes")
 
     response_headers = {
         "Content-Type":  content_type,
@@ -228,8 +363,8 @@ async def music_status():
     track = music_engine.current_track()
     return JSONResponse({
         "available": music_engine.is_available(),
-        "playing": track is not None,
-        "track": track,
+        "playing":   track is not None,
+        "track":     track,
     })
 
 @app.post("/music/stop")
@@ -242,7 +377,6 @@ async def music_stop_endpoint():
 
 @app.get("/history/sessions")
 async def history_sessions(limit: int = 50):
-    """List recent sessions with preview and message count."""
     sessions_list = await asyncio.get_event_loop().run_in_executor(
         None, lambda: conv_store.sessions(limit)
     )
@@ -250,7 +384,6 @@ async def history_sessions(limit: int = 50):
 
 @app.get("/history/sessions/{session_id}")
 async def history_session_messages(session_id: int):
-    """Get all messages for a specific session."""
     messages = await asyncio.get_event_loop().run_in_executor(
         None, lambda: conv_store.session_messages(session_id)
     )
@@ -258,7 +391,6 @@ async def history_session_messages(session_id: int):
 
 @app.delete("/history/sessions/{session_id}")
 async def history_delete_session(session_id: int):
-    """Delete a session and all its messages."""
     await asyncio.get_event_loop().run_in_executor(
         None, lambda: conv_store.delete_session(session_id)
     )
@@ -266,7 +398,6 @@ async def history_delete_session(session_id: int):
 
 @app.get("/history/search")
 async def history_search(q: str, limit: int = 20):
-    """Full-text search across all conversation history."""
     if not q.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
     results = await asyncio.get_event_loop().run_in_executor(
@@ -334,24 +465,18 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     _prune_sessions()
 
-    ws_id = str(id(ws))
+    ws_id  = str(id(ws))
     memory = Memory()
 
-    # Create a persistent conversation session in SQLite
     conv_sid = await asyncio.get_event_loop().run_in_executor(
         None, conv_store.new_session
     )
-
-    # Store the conv_session_id in memory so handlers can reference it
     memory.remember("_session_id", str(conv_sid))
-
     _touch(ws_id, memory, conv_sid)
     _ws_connections[conv_sid] = ws
 
     welcome = "ARIA online. All systems operational. How can I assist you?"
     await ws.send_text(json.dumps({"type": "aria", "text": welcome}))
-
-    # Persist the welcome message
     await asyncio.get_event_loop().run_in_executor(
         None, lambda: conv_store.add(conv_sid, "aria", welcome)
     )
@@ -365,13 +490,39 @@ async def websocket_endpoint(ws: WebSocket):
                 music_engine.stop()
                 continue
 
+            # ── File upload message ──
+            if data.get("type") == "file_ask":
+                file_meta = data.get("file")
+                question  = data.get("question", "").strip()
+                if not file_meta:
+                    continue
+                await ws.send_text(json.dumps({"type": "typing"}))
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: handle_file_question(file_meta, question)
+                )
+                await ws.send_text(json.dumps({"type": "stream_start"}))
+                if result["type"] == "image":
+                    # Send image data for inline display
+                    await ws.send_text(json.dumps({
+                        "type":    "file_image",
+                        "b64":     result.get("b64", ""),
+                        "mime":    result.get("mime", "image/png"),
+                        "name":    result.get("name", "image"),
+                        "caption": result.get("content", ""),
+                    }))
+                else:
+                    await ws.send_text(json.dumps({
+                        "type": "stream_chunk",
+                        "text": result["content"],
+                    }))
+                await ws.send_text(json.dumps({"type": "stream_end"}))
+                continue
+
             user_text = data.get("text", "").strip()
             if not user_text:
                 continue
 
             _touch(ws_id, memory, conv_sid)
-
-            # Persist user message
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda t=user_text: conv_store.add(conv_sid, "user", t)
             )
@@ -379,7 +530,7 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_text(json.dumps({"type": "user", "text": user_text}))
             await ws.send_text(json.dumps({"type": "typing"}))
 
-            gen = process_stream(user_text, memory)
+            gen         = process_stream(user_text, memory)
             first_chunk = None
             async for chunk in gen:
                 first_chunk = chunk
@@ -396,7 +547,6 @@ async def websocket_endpoint(ws: WebSocket):
                 await _handle_music_stop(ws, memory)
                 continue
 
-            # Normal streaming response — collect for persistence
             await ws.send_text(json.dumps({"type": "stream_start"}))
             await ws.send_text(json.dumps({"type": "stream_chunk", "text": first_chunk}))
 
@@ -407,8 +557,6 @@ async def websocket_endpoint(ws: WebSocket):
                     full_response += chunk
 
             await ws.send_text(json.dumps({"type": "stream_end"}))
-
-            # Persist ARIA's response
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda r=full_response: conv_store.add(conv_sid, "aria", r)
             )
