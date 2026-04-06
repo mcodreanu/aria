@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ARIA — History</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <style>
+      /* ── History-specific overrides ── */
+      html,
+      body {
+        overflow: auto;
+      }
+
+      #history-app {
+        position: relative;
+        z-index: 1;
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 0 16px 40px;
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+      }
+
+      .history-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px 0 16px;
+        border-bottom: 1px solid var(--border);
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .history-header h2 {
+        font-family: "Orbitron", sans-serif;
+        font-size: 1.1rem;
+        font-weight: 700;
+        letter-spacing: 0.15em;
+        color: var(--accent);
+        text-shadow: 0 0 16px var(--accent);
+      }
+
+      .history-header a {
+        font-size: 0.72rem;
+        color: var(--text-dim);
+        text-decoration: none;
+        border: 1px solid var(--border);
+        padding: 4px 12px;
+        border-radius: 2px;
+        transition:
+          border-color 0.2s,
+          color 0.2s;
+      }
+      .history-header a:hover {
+        border-color: var(--accent2);
+        color: var(--accent);
+      }
+
+      /* Search */
+      .search-bar {
+        display: flex;
+        gap: 8px;
+        margin: 16px 0 8px;
+      }
+      .search-bar input {
+        flex: 1;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 2px;
+        color: var(--text);
+        font-family: "Share Tech Mono", monospace;
+        font-size: 0.88rem;
+        padding: 8px 14px;
+        outline: none;
+        caret-color: var(--accent);
+        transition: border-color 0.2s;
+      }
+      .search-bar input:focus {
+        border-color: var(--accent2);
+      }
+      .search-bar input::placeholder {
+        color: var(--text-dim);
+      }
+      .search-bar button {
+        background: transparent;
+        border: 1px solid var(--accent);
+        color: var(--accent);
+        font-family: "Orbitron", sans-serif;
+        font-size: 0.65rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        padding: 8px 16px;
+        cursor: pointer;
+        border-radius: 2px;
+        transition: background 0.2s;
+      }
+      .search-bar button:hover {
+        background: var(--glow);
+      }
+
+      /* Stats bar */
+      .stats-bar {
+        display: flex;
+        gap: 24px;
+        font-size: 0.68rem;
+        color: var(--text-dim);
+        margin-bottom: 12px;
+        letter-spacing: 0.05em;
+      }
+      .stats-bar span strong {
+        color: var(--accent);
+      }
+
+      /* Layout: sidebar + main */
+      .history-body {
+        display: flex;
+        gap: 16px;
+        margin-top: 8px;
+        flex: 1;
+      }
+
+      /* Session list sidebar */
+      .session-list {
+        width: 260px;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .session-item {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 2px;
+        padding: 8px 12px;
+        cursor: pointer;
+        transition: border-color 0.2s;
+        position: relative;
+      }
+      .session-item:hover {
+        border-color: var(--accent2);
+      }
+      .session-item.active {
+        border-color: var(--accent);
+        border-left: 2px solid var(--accent);
+      }
+
+      .session-item .si-label {
+        font-size: 0.78rem;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-bottom: 4px;
+      }
+      .session-item .si-meta {
+        font-size: 0.62rem;
+        color: var(--text-dim);
+        display: flex;
+        justify-content: space-between;
+      }
+      .session-item .si-delete {
+        position: absolute;
+        top: 6px;
+        right: 8px;
+        background: transparent;
+        border: none;
+        color: var(--text-dim);
+        cursor: pointer;
+        font-size: 0.9rem;
+        opacity: 0;
+        transition:
+          opacity 0.2s,
+          color 0.2s;
+        line-height: 1;
+        padding: 0;
+      }
+      .session-item:hover .si-delete {
+        opacity: 1;
+      }
+      .session-item .si-delete:hover {
+        color: var(--danger);
+      }
+
+      /* Message viewer */
+      .message-view {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .mv-empty {
+        color: var(--text-dim);
+        font-size: 0.82rem;
+        margin-top: 20px;
+        text-align: center;
+      }
+
+      /* Reuse existing .msg styles from style.css */
+      .history-msg {
+        display: flex;
+        gap: 10px;
+        max-width: 82%;
+      }
+      .history-msg.user {
+        align-self: flex-end;
+        flex-direction: row-reverse;
+      }
+      .history-msg.aria {
+        align-self: flex-start;
+      }
+
+      .history-msg .hm-avatar {
+        width: 28px;
+        height: 28px;
+        flex-shrink: 0;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: "Orbitron", sans-serif;
+        font-size: 0.55rem;
+        font-weight: 700;
+      }
+      .history-msg.aria .hm-avatar {
+        background: var(--aria-msg);
+        border: 1px solid var(--accent);
+        color: var(--accent);
+      }
+      .history-msg.user .hm-avatar {
+        background: #0a1a10;
+        border: 1px solid #00aa66;
+        color: #00aa66;
+      }
+
+      .history-msg .hm-body {
+        padding: 8px 12px;
+        border-radius: 2px;
+        font-size: 0.84rem;
+        line-height: 1.6;
+      }
+      .history-msg.aria .hm-body {
+        background: var(--aria-msg);
+        border: 1px solid var(--border);
+        border-left: 2px solid var(--accent);
+      }
+      .history-msg.user .hm-body {
+        background: var(--user-msg);
+        border: 1px solid #0a3020;
+        border-right: 2px solid #00aa66;
+        color: #88ddaa;
+      }
+      .history-msg .hm-time {
+        font-size: 0.6rem;
+        color: var(--text-dim);
+        margin-top: 3px;
+      }
+      .history-msg.user .hm-time {
+        text-align: right;
+      }
+
+      /* Search results */
+      .search-results {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .search-result-item {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-left: 2px solid var(--accent2);
+        padding: 10px 14px;
+        border-radius: 2px;
+        cursor: pointer;
+        transition: border-color 0.2s;
+      }
+      .search-result-item:hover {
+        border-color: var(--accent);
+      }
+      .search-result-item .sri-meta {
+        font-size: 0.62rem;
+        color: var(--text-dim);
+        margin-bottom: 4px;
+      }
+      .search-result-item .sri-text {
+        font-size: 0.82rem;
+        color: var(--text);
+      }
+      .search-result-item .sri-text em {
+        color: var(--accent);
+        font-style: normal;
+        font-weight: 700;
+      }
+
+      /* Loading */
+      .loading {
+        color: var(--text-dim);
+        font-size: 0.78rem;
+        padding: 12px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="history-app">
+      <header class="history-header">
+        <h2>📜 CONVERSATION HISTORY</h2>
+        <div style="display: flex; gap: 8px; align-items: center">
+          <div class="stats-bar" id="stats-bar">
+            <span>Loading...</span>
+          </div>
+          <a href="/">← Back to ARIA</a>
+        </div>
+      </header>
+
+      <div class="search-bar">
+        <input
+          id="search-input"
+          type="text"
+          placeholder="Search all conversations..."
+          autocomplete="off"
+        />
+        <button onclick="doSearch()">SEARCH</button>
+      </div>
+
+      <div class="history-body">
+        <div class="session-list" id="session-list">
+          <div class="loading">Loading sessions...</div>
+        </div>
+        <div class="message-view" id="message-view">
+          <div class="mv-empty">
+            Select a session on the left to view messages.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // ── Helpers ──────────────────────────────────────────────────────────────────
+
+      function fmtDate(ts) {
+        if (!ts) return "";
+        const d = new Date(ts * 1000);
+        return d.toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      }
+
+      function escHtml(s) {
+        return String(s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      function formatText(raw) {
+        let t = escHtml(raw);
+        t = t.replace(/```([\s\S]+?)```/g, "<pre>$1</pre>");
+        t = t.replace(/`(.+?)`/g, "<code>$1</code>");
+        t = t.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+        t = t.replace(/\*(.+?)\*/g, "<em>$1</em>");
+        t = t.replace(
+          /(https?:\/\/[^\s&<>"']+)/g,
+          '<a href="$1" target="_blank" rel="noopener">$1</a>',
+        );
+        t = t.replace(/\n/g, "<br>");
+        return t;
+      }
+
+      // ── Stats ─────────────────────────────────────────────────────────────────────
+
+      async function loadStats() {
+        try {
+          const r = await fetch("/history/stats");
+          const d = await r.json();
+          document.getElementById("stats-bar").innerHTML =
+            `<span><strong>${d.total_sessions ?? 0}</strong> sessions</span>` +
+            `<span><strong>${d.total_messages ?? 0}</strong> messages</span>`;
+        } catch (e) {}
+      }
+
+      // ── Session list ──────────────────────────────────────────────────────────────
+
+      let _activeSessionId = null;
+
+      async function loadSessions() {
+        const el = document.getElementById("session-list");
+        try {
+          const r = await fetch("/history/sessions?limit=100");
+          const d = await r.json();
+          if (!d.sessions.length) {
+            el.innerHTML = '<div class="loading">No sessions yet.</div>';
+            return;
+          }
+          el.innerHTML = d.sessions
+            .map((s) => {
+              const label = s.label || s.preview || "(empty session)";
+              const preview =
+                escHtml(label.slice(0, 50)) + (label.length > 50 ? "…" : "");
+              return `
+        <div class="session-item" id="si-${s.id}" onclick="loadSession(${s.id})">
+          <div class="si-label">${preview}</div>
+          <div class="si-meta">
+            <span>${fmtDate(s.started_at)}</span>
+            <span>${s.msg_count} msgs</span>
+          </div>
+          <button class="si-delete" onclick="deleteSession(event,${s.id})" title="Delete">×</button>
+        </div>`;
+            })
+            .join("");
+        } catch (e) {
+          el.innerHTML = `<div class="loading">Error loading sessions: ${e}</div>`;
+        }
+      }
+
+      async function loadSession(sessionId) {
+        _activeSessionId = sessionId;
+
+        // Highlight active
+        document
+          .querySelectorAll(".session-item")
+          .forEach((el) => el.classList.remove("active"));
+        const si = document.getElementById(`si-${sessionId}`);
+        if (si) si.classList.add("active");
+
+        // Clear search
+        document.getElementById("search-input").value = "";
+
+        const view = document.getElementById("message-view");
+        view.innerHTML = '<div class="loading">Loading messages...</div>';
+
+        try {
+          const r = await fetch(`/history/sessions/${sessionId}`);
+          const d = await r.json();
+          if (!d.messages.length) {
+            view.innerHTML =
+              '<div class="mv-empty">No messages in this session.</div>';
+            return;
+          }
+          view.innerHTML = d.messages
+            .map(
+              (m) => `
+      <div class="history-msg ${escHtml(m.role)}">
+        <div class="hm-avatar">${m.role === "aria" ? "AR" : "ME"}</div>
+        <div>
+          <div class="hm-body">${formatText(m.text)}</div>
+          <div class="hm-time">${fmtDate(m.ts)}</div>
+        </div>
+      </div>`,
+            )
+            .join("");
+          view.scrollTop = 0;
+        } catch (e) {
+          view.innerHTML = `<div class="mv-empty">Error: ${e}</div>`;
+        }
+      }
+
+      async function deleteSession(evt, sessionId) {
+        evt.stopPropagation();
+        if (!confirm("Delete this session and all its messages?")) return;
+        await fetch(`/history/sessions/${sessionId}`, { method: "DELETE" });
+        if (_activeSessionId === sessionId) {
+          document.getElementById("message-view").innerHTML =
+            '<div class="mv-empty">Session deleted.</div>';
+          _activeSessionId = null;
+        }
+        await loadSessions();
+        await loadStats();
+      }
+
+      // ── Search ────────────────────────────────────────────────────────────────────
+
+      async function doSearch() {
+        const q = document.getElementById("search-input").value.trim();
+        if (!q) {
+          loadSessions();
+          return;
+        }
+
+        const view = document.getElementById("message-view");
+        view.innerHTML = '<div class="loading">Searching...</div>';
+
+        try {
+          const r = await fetch(
+            `/history/search?q=${encodeURIComponent(q)}&limit=30`,
+          );
+          const d = await r.json();
+          if (!d.results.length) {
+            view.innerHTML = `<div class="mv-empty">No results for <strong>"${escHtml(q)}"</strong>.</div>`;
+            return;
+          }
+
+          // Highlight query in results
+          const hi = (text) => {
+            const safe = escHtml(text);
+            const re = new RegExp(
+              `(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
+              "gi",
+            );
+            return safe.replace(re, "<em>$1</em>");
+          };
+
+          view.innerHTML = `
+      <div style="font-size:0.72rem;color:var(--text-dim);margin-bottom:4px">
+        ${d.count} result${d.count !== 1 ? "s" : ""} for <strong style="color:var(--accent)">"${escHtml(q)}"</strong>
+      </div>
+      <div class="search-results">
+        ${d.results
+          .map(
+            (r) => `
+          <div class="search-result-item" onclick="loadSession(${r.session_id})">
+            <div class="sri-meta">
+              ${fmtDate(r.ts)} · ${r.role === "user" ? "You" : "ARIA"} · session #${r.session_id}
+            </div>
+            <div class="sri-text">${hi(r.text.slice(0, 200))}${r.text.length > 200 ? "…" : ""}</div>
+          </div>`,
+          )
+          .join("")}
+      </div>`;
+        } catch (e) {
+          view.innerHTML = `<div class="mv-empty">Search error: ${e}</div>`;
+        }
+      }
+
+      document
+        .getElementById("search-input")
+        .addEventListener("keydown", (e) => {
+          if (e.key === "Enter") doSearch();
+        });
+
+      // ── Boot ──────────────────────────────────────────────────────────────────────
+      loadStats();
+      loadSessions();
+    </script>
+  </body>
+</html>

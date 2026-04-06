@@ -14,13 +14,13 @@ import os
 import threading
 import urllib.request
 import logging
-from pathlib import Path
+from memory import DATA_DIR
 
 logger = logging.getLogger("aria.tts")
 
 # ── Model file locations ────────────────────────────────────────────────────
 
-MODELS_DIR   = Path(__file__).parent / "kokoro_models"
+MODELS_DIR = DATA_DIR / "kokoro_models"
 ONNX_PATH    = MODELS_DIR / "kokoro-v1.0.onnx"
 VOICES_PATH  = MODELS_DIR / "voices-v1.0.bin"
 

@@ -23,6 +23,8 @@ ARIA is a fully self-contained AI assistant that runs on your machine. It answer
 
 - **No cloud, no API keys** — uses DuckDuckGo, Wikipedia, and your own local models
 - **Local LLM fallback** — integrates with [Ollama](https://ollama.com) (Mistral, Llama 3, Phi-3, and more)
+- **Streaming responses** — LLM output appears token-by-token as it generates, just like ChatGPT; rule-based responses are instant
+- **Conversation history** — the LLM always receives the last 5 exchanges as context, so follow-up questions and multi-turn conversations work naturally
 - **Rule-based fast lane** — common intents (time, files, search, math) are answered instantly without hitting the LLM
 - **Kokoro TTS** — natural, local text-to-speech with browser fallback
 - **Wake word** — say "Hey ARIA" to activate voice input hands-free
@@ -46,18 +48,15 @@ ARIA online. All systems operational. How can I assist you?
   The result of sqrt(1764) is 42.
 
 > Write me a Python function that checks if a number is prime
-  def is_prime(n: int) -> bool:
+  def is_prime(n: int) -> bool:        ← streams token by token
       if n < 2: return False
       for i in range(2, int(n**0.5) + 1):
           if n % i == 0: return False
       return True
 
-> Ollama status
-  Ollama is online.
-  Active model: mistral:latest
-  Pulled models:
-    - mistral:latest
-    - llama3:latest
+> What did I just ask you to write?
+  You asked me to write a Python function that checks whether a number
+  is prime.                            ← LLM uses conversation history
 ```
 
 ---
@@ -67,6 +66,8 @@ ARIA online. All systems operational. How can I assist you?
 | Category            | Commands                                                                         |
 | ------------------- | -------------------------------------------------------------------------------- |
 | 🤖 **Local LLM**    | Free-form chat, code generation, reasoning — powered by Ollama                   |
+| 📡 **Streaming**    | LLM responses stream token-by-token; no frozen wait                              |
+| 🧵 **Context**      | LLM always receives last 5 exchanges — follow-ups and multi-turn chat work       |
 | 🌐 **Web Search**   | `search for black holes` · `google best Python frameworks`                       |
 | 📖 **Wikipedia**    | `wiki Alan Turing` · `What is quantum computing?` · `Who was Cleopatra?`         |
 | 🕐 **Time & Date**  | `What time is it?` · `What day is today?`                                        |
@@ -112,7 +113,7 @@ That's it. ARIA works out of the box without Ollama or Kokoro. Both are optional
 
 ## Enabling the Local LLM (Ollama)
 
-Ollama gives ARIA real reasoning ability for anything the rule engine doesn't cover — creative writing, coding help, explanations, general conversation.
+Ollama gives ARIA real reasoning ability for anything the rule engine doesn't cover — creative writing, coding help, explanations, general conversation. Responses **stream token-by-token** so you see output immediately.
 
 ```bash
 # 1. Install Ollama
@@ -145,6 +146,46 @@ OLLAMA_MODEL=llama3
 | `deepseek-r1` | ~5 GB | Math and step-by-step reasoning  |
 
 ARIA still works perfectly if Ollama is not running — it just uses web search and Wikipedia as its knowledge source instead.
+
+---
+
+## How Streaming Works
+
+Every response goes through a single `process_stream()` async generator in `aria_brain.py`. The WebSocket handler in `main.py` forwards each yielded chunk to the browser using the streaming protocol the frontend already expects:
+
+```
+{"type": "stream_start"}                — clears typing indicator, opens bubble
+{"type": "stream_chunk", "text": "…"}  — appends text to the bubble
+{"type": "stream_end"}                 — stamps timestamp, triggers TTS
+```
+
+**Rule-based handlers** (greetings, date, calculator, search, files…) are instant — they yield a single chunk containing the full response. No fake streaming delay is added.
+
+**LLM responses** (Ollama) stream token-by-token via an async generator that wraps Ollama's streaming HTTP API. The blocking I/O runs in a thread-pool executor so the event loop stays free for other connections.
+
+---
+
+## How Conversation History Works
+
+Every user message and ARIA response is appended to an in-memory history list inside the `Memory` object. When the LLM is invoked, `memory.recent(10)` (the last 5 exchanges) is passed to `ollama.py` which injects it into the prompt:
+
+```
+[System]
+You are ARIA…
+
+[User]
+Write a Python function that checks if a number is prime
+
+[ARIA]
+def is_prime(n: int) -> bool: …
+
+[User]
+What did I just ask you to write?
+
+[ARIA]          ← generated with full context
+```
+
+This means follow-up questions, pronoun references ("what about that?"), and corrections all work naturally across a conversation.
 
 ---
 
@@ -188,11 +229,11 @@ User input
     ├─ Explicit: "wiki ..." / "search for ..."
     ├─ Smart question fallback → Wikipedia + DuckDuckGo
     ├─ "Ollama status" / "use ollama ..." (force LLM)
-    ├─ LLM fallback → Ollama (if running, with conversation history)
+    ├─ LLM streaming fallback → Ollama (with conversation history)
     └─ Unknown → friendly error with suggestions
 ```
 
-The rule-based handlers at the top are instant. The LLM is only reached when nothing else matched, keeping response times fast for common tasks.
+Rule-based handlers at the top are instant. The LLM is only reached when nothing else matched, keeping response times fast for common tasks. When the LLM is reached, tokens stream directly to the browser.
 
 ---
 
@@ -201,10 +242,10 @@ The rule-based handlers at the top are instant. The LLM is only reached when not
 ```
 aria/
 ├── backend/
-│   ├── main.py          # FastAPI server · WebSocket · routes · session management
-│   ├── aria_brain.py    # NLP pipeline · all intent handlers · LLM fallback
-│   ├── ollama.py        # Ollama integration · prompt building · generate/stream
-│   ├── memory.py        # Session history + persistent facts (aria_memory.json)
+│   ├── main.py          # FastAPI server · WebSocket · streaming protocol · session management
+│   ├── aria_brain.py    # NLP pipeline · all intent handlers · process() + process_stream()
+│   ├── ollama.py        # Ollama integration · generate() + generate_stream_async()
+│   ├── memory.py        # Session history (in-RAM) + persistent facts (aria_memory.json)
 │   ├── search.py        # DuckDuckGo instant answers · Wikipedia REST API
 │   ├── tools.py         # Time · safe calculator · file CRUD · open apps · system info
 │   ├── tts.py           # Kokoro TTS · thread-safe engine loader · WAV synthesis
@@ -213,7 +254,7 @@ aria/
 ├── frontend/
 │   ├── index.html       # Sci-fi holographic UI · quick-command buttons
 │   ├── style.css        # Dark theme · cyan glow · animated logo · responsive
-│   └── aria.js          # WebSocket client · streaming support · TTS · STT · wake word
+│   └── aria.js          # WebSocket client · streaming handler · TTS · STT · wake word
 ├── .env.example         # Documented environment variables
 ├── .gitignore
 └── README.md
@@ -238,7 +279,7 @@ HANDLERS = [
 ]
 ```
 
-Each handler receives the lowercased input and the memory object. Return a string to respond, or `None` to pass to the next handler. The LLM fallback at the bottom means anything you don't explicitly handle will still get a sensible answer.
+Each handler receives the lowercased input and the memory object. Return a string to respond, or `None` to pass to the next handler. `process_stream()` automatically wraps your string as a single chunk — you don't need to touch the streaming code. The LLM fallback at the bottom means anything you don't explicitly handle will still get a sensible answer.
 
 ---
 
@@ -252,7 +293,20 @@ Each handler receives the lowercased input and the memory object. Return a strin
 | `POST` | `/tts`           | Synthesize text → WAV audio                         |
 | `GET`  | `/ollama/status` | Ollama availability, active model, pulled models    |
 | `GET`  | `/ollama/models` | List of locally-pulled Ollama models                |
-| `WS`   | `/ws`            | Main chat WebSocket                                 |
+| `WS`   | `/ws`            | Main chat WebSocket (streaming protocol)            |
+
+### WebSocket Streaming Protocol
+
+Messages sent from server → client:
+
+| Type           | Payload        | When                                          |
+| -------------- | -------------- | --------------------------------------------- |
+| `typing`       | —              | Immediately on receive (shows dots)           |
+| `stream_start` | —              | Clears typing, opens response bubble          |
+| `stream_chunk` | `text: string` | Each chunk of the response (1–N per response) |
+| `stream_end`   | —              | Response complete; triggers TTS               |
+
+Rule-based responses send exactly one `stream_chunk`. LLM responses send many.
 
 ---
 
@@ -268,7 +322,7 @@ ARIA saves facts to `backend/aria_memory.json` automatically:
 }
 ```
 
-The file is created on first use and survives server restarts. Say **"clear memory"** to wipe it and start fresh.
+The file is created on first use and survives server restarts. Conversation history (for LLM context) is in-RAM only and resets on reconnect. Say **"clear memory"** to wipe persisted facts and start fresh.
 
 ---
 
@@ -278,8 +332,8 @@ The file is created on first use and survives server restarts. Say **"clear memo
 - [x] Voice input (Web Speech API + "Hey ARIA" wake word)
 - [x] Voice output (Kokoro TTS + browser fallback)
 - [x] Local LLM fallback (Ollama — Mistral, Llama 3, Phi-3…)
-- [x] Conversation history passed to LLM
-- [ ] Streaming LLM responses (token-by-token output)
+- [x] Conversation history passed to LLM (last 5 exchanges)
+- [x] Streaming LLM responses (token-by-token output)
 - [ ] Persistent conversation history with search
 - [ ] Plugin system for custom skills
 - [ ] Typed memory facts (structured notes, deadlines, preferences)

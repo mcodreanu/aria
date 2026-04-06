@@ -20,19 +20,31 @@ dist/
 *.egg
 .eggs/
 
-# ── ARIA specific ─────────────────────────────────────────────────────────────
-# Persistent memory file — contains personal data (name, notes, etc.)
-backend/aria_memory.json
-backend/aria_memory.json.tmp
+# ── ARIA runtime data ─────────────────────────────────────────────────────────
+# Persistent memory — contains personal data (name, notes, etc.)
+aria_memory.json
+aria_memory.json.tmp
 
-# Kokoro TTS model files — large binaries (~85MB), downloaded automatically on first run
-backend/kokoro_models/
+# SQLite conversation history — large, personal, regenerates automatically
+conversations.db
+conversations.db-shm
+conversations.db-wal
+
+# Kokoro TTS model files (~85 MB) — downloaded automatically on first run
+kokoro_models/
+
+# Screenshot temp files
+aria_screenshots/
+
+# Music temp files
+aria_music/
 
 # ── Environment & secrets ─────────────────────────────────────────────────────
 .env
 .env.local
 .env.*.local
 *.env
+!.env.example
 
 # ── IDE & editors ─────────────────────────────────────────────────────────────
 .vscode/
@@ -40,13 +52,6 @@ backend/kokoro_models/
 *.swp
 *.swo
 *~
-.DS_Store
-Thumbs.db
-
-# ── Logs ──────────────────────────────────────────────────────────────────────
-*.log
-logs/
-uvicorn.log
 
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
@@ -57,6 +62,10 @@ uvicorn.log
 ehthumbs.db
 Thumbs.db
 desktop.ini
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 .pytest_cache/

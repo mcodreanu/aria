@@ -28,7 +28,7 @@ import json
 import logging
 import urllib.request
 import urllib.error
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 
 logger = logging.getLogger("aria.ollama")
 
@@ -186,12 +186,9 @@ def generate(user_input: str, history: list[dict]) -> str:
 
 def generate_stream(user_input: str, history: list[dict]) -> Iterator[str]:
     """
-    Streaming variant — yields text chunks as they arrive from Ollama.
+    Synchronous streaming variant — yields text chunks as they arrive.
+    Used by the async wrapper below via run_in_executor.
     Each chunk is a small string (a few tokens).
-
-    Usage:
-        for chunk in generate_stream(text, history):
-            send_to_websocket(chunk)
 
     Raises RuntimeError / TimeoutError on connection failure.
     """
@@ -238,3 +235,55 @@ def generate_stream(user_input: str, history: list[dict]) -> Iterator[str]:
         raise RuntimeError(f"Ollama unreachable: {exc.reason}") from exc
     except socket.timeout as exc:
         raise TimeoutError(f"Ollama stream timed out after {_GENERATE_TIMEOUT}s") from exc
+
+
+async def generate_stream_async(user_input: str, history: list[dict]) -> AsyncIterator[str]:
+    """
+    Async streaming generator — yields text chunks from Ollama without
+    blocking the event loop.
+
+    Wraps generate_stream() (synchronous, blocking I/O) using asyncio's
+    thread-pool executor so FastAPI / uvicorn stay responsive while the
+    model is generating.
+
+    Usage in an async context:
+        async for chunk in generate_stream_async(text, history):
+            await ws.send_text(json.dumps({"type": "stream_chunk", "text": chunk}))
+    """
+    import asyncio
+    import queue
+    import threading
+
+    loop = asyncio.get_event_loop()
+    q: queue.Queue[str | None] = queue.Queue()
+    exc_holder: list[Exception] = []
+
+    def _producer():
+        """Run the blocking generator in a thread; push tokens onto the queue."""
+        try:
+            for token in generate_stream(user_input, history):
+                q.put(token)
+        except Exception as e:
+            exc_holder.append(e)
+        finally:
+            q.put(None)  # sentinel
+
+    thread = threading.Thread(target=_producer, daemon=True)
+    thread.start()
+
+    while True:
+        # Poll the queue without blocking the event loop
+        try:
+            token = await loop.run_in_executor(None, q.get)
+        except Exception:
+            break
+
+        if token is None:
+            break  # sentinel received — generation complete
+
+        yield token
+
+    thread.join(timeout=1)
+
+    if exc_holder:
+        raise exc_holder[0]

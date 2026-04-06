@@ -10,15 +10,22 @@ noisy to persist every chat line forever.
 import json
 import time
 import os
+from pathlib import Path          # ← was wrongly "from anyio import Path"
 from typing import Optional
 
-MEMORY_FILE = os.path.join(os.path.dirname(__file__), "aria_memory.json")
+# DATA_DIR is one level up from backend/ — all runtime files live here.
+# mkdir(parents, exist_ok) runs at import time so every module that imports
+# DATA_DIR is guaranteed the directory exists before it tries to use it.
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+MEMORY_FILE = DATA_DIR / "aria_memory.json"
 
 
 def _load_facts() -> dict:
     """Read persisted facts from disk. Returns empty dict on any error."""
     try:
-        if os.path.exists(MEMORY_FILE):
+        if MEMORY_FILE.exists():
             with open(MEMORY_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
@@ -30,7 +37,7 @@ def _load_facts() -> dict:
 
 def _save_facts(facts: dict) -> None:
     """Write facts dict to disk atomically (write temp → rename)."""
-    tmp = MEMORY_FILE + ".tmp"
+    tmp = MEMORY_FILE.with_suffix(".tmp")   # ← was MEMORY_FILE + ".tmp" which crashes on Path
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(facts, f, indent=2, ensure_ascii=False)
@@ -42,14 +49,14 @@ def _save_facts(facts: dict) -> None:
 class Memory:
     """
     Two-tier memory:
-      • facts  — persisted to aria_memory.json (name, notes, preferences…)
+      • facts   — persisted to aria_memory.json (name, notes, preferences…)
       • history — in-RAM only, current session conversation log
     """
 
     def __init__(self, max_entries: int = 50):
         self.max_entries = max_entries
         self.history: list[dict] = []
-        self.facts: dict[str, str] = _load_facts()   # ← loaded from disk
+        self.facts: dict[str, str] = _load_facts()
         self.session_start = time.time()
 
     # ── Conversation history (session only) ──────────────────────────────────
@@ -75,7 +82,7 @@ class Memory:
 
     def remember(self, key: str, value: str):
         self.facts[key] = value
-        _save_facts(self.facts)           # ← write to disk immediately
+        _save_facts(self.facts)
 
     def recall(self, key: str) -> Optional[str]:
         return self.facts.get(key)

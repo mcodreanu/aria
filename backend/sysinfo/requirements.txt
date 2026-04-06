@@ -1,0 +1,29 @@
+fastapi
+uvicorn[standard]
+websockets
+python-dotenv
+
+# Safe math expression evaluator
+asteval
+
+# HTTP client
+httpx
+
+# Music playback — streams audio from YouTube via yt-dlp (no API key needed)
+yt-dlp
+
+# Kokoro TTS — natural voice synthesis (optional)
+kokoro-onnx
+soundfile
+
+# ── New features ────────────────────────────────────────────────────────────
+
+# Reminders / task scheduler
+apscheduler
+
+# Clipboard read/write
+pyperclip
+
+# Screenshots
+mss
+Pillow

@@ -1,9 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// ARIA Frontend
-// TTS:   Kokoro-ONNX via POST /tts  (primary, natural voice)
-//        Web SpeechSynthesis        (fallback if Kokoro unavailable)
-// STT:   Web Speech API             (Chrome/Edge only)
-// Wake:  "Hey ARIA" passive listener
+// ARIA Frontend — Fast + correct ordered TTS pipeline
 // ─────────────────────────────────────────────────────────────────────────────
 
 const chat = document.getElementById("chat");
@@ -19,205 +15,183 @@ let ws = null;
 let typingEl = null;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TTS mode detection — check once if Kokoro backend is available
+// TTS — ordered fetch chain → ordered playback queue
 // ─────────────────────────────────────────────────────────────────────────────
 
-let kokoroAvailable = false;
-let currentAudio = null;
 let isMuted = false;
-let audioQueue = [];
 let isSpeaking = false;
+let _ttsReady = false; // unlocked after first user interaction
+let audioQueue = []; // [{url}] — fully resolved, ready to play in order
+let currentAudio = null;
 
-// FIX: was called twice — once standalone (promise ignored) and once with .then().
-// Now there is exactly one call at boot, inside the .then() so the wake listener
-// starts only after TTS detection has resolved.
-async function detectTTSMode() {
+// Serial fetch chain: each chunk waits for the previous fetch to finish
+// before starting its own. This guarantees audioQueue is filled in order
+// even if short sentences synthesize faster than long ones.
+let _fetchChain = Promise.resolve();
+
+// Sentence buffer config
+const MIN_CHUNK = 8; // ignore fragments shorter than this
+const EAGER_CHARS = 80; // flush mid-sentence if buffer exceeds this
+
+// ── TTS status / prewarm ────────────────────────────────────────────────────
+
+async function initTTS() {
   try {
     const res = await fetch("/tts/status");
     const data = await res.json();
-    kokoroAvailable = data.available === true;
-  } catch (_) {
-    kokoroAvailable = false;
-  }
-
-  if (kokoroAvailable) {
-    setVoiceStatus("🎙 Kokoro voice engine ready", 3000);
-  } else {
-    setVoiceStatus("⚠ Kokoro not installed — using browser voice", 4000);
-    loadBrowserVoices();
+    if (data.available) {
+      setVoiceStatus("🎙 Kokoro voice ready", 3000);
+      // Prewarm: load ONNX model before the first real request
+      fetch("/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "." }),
+      }).catch(() => {});
+    } else {
+      setVoiceStatus("⚠ Kokoro not available — voice disabled", 5000);
+    }
+  } catch {
+    setVoiceStatus("⚠ Could not reach TTS — voice disabled", 5000);
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Kokoro TTS  (primary)
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Core fetch (one sentence at a time, called serially via _fetchChain) ───
 
-async function speakKokoro(text) {
-  if (isMuted || !text.trim()) return;
-
-  const capped = text.length > 500 ? text.slice(0, 497) + "..." : text;
-
+async function _doFetch(text) {
+  const clean = text.trim();
+  if (!clean || isMuted) return null;
   try {
     const res = await fetch("/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: capped }),
+      body: JSON.stringify({ text: clean }),
     });
-
-    if (!res.ok) throw new Error(`TTS status ${res.status}`);
-
+    if (!res.ok) return null;
     const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-
-    currentAudio = audio;
-    micBtn.classList.add("speaking");
-
-    audio.onended = () => {
-      URL.revokeObjectURL(url);
-      micBtn.classList.remove("speaking");
-      currentAudio = null;
-      isSpeaking = false;
-      _drainQueue();
-    };
-
-    audio.onerror = () => {
-      URL.revokeObjectURL(url);
-      micBtn.classList.remove("speaking");
-      currentAudio = null;
-      isSpeaking = false;
-      _drainQueue();
-    };
-
-    isSpeaking = true;
-    await audio.play();
-  } catch (err) {
-    console.warn("[TTS] Kokoro failed, falling back to browser:", err);
-    isSpeaking = false;
-    micBtn.classList.remove("speaking");
-    speakBrowser(capped);
+    return { url: URL.createObjectURL(blob) };
+  } catch {
+    return null;
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Browser TTS  (fallback)
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Playback ────────────────────────────────────────────────────────────────
 
-let browserVoice = null;
-
-function loadBrowserVoices() {
-  const tryLoad = () => {
-    const voices = speechSynthesis.getVoices();
-    if (!voices.length) return;
-
-    const priority = [
-      (v) => v.name.includes("Zira"),
-      (v) => v.name.includes("Jenny"),
-      (v) => v.name.includes("Aria"),
-      (v) => v.name.includes("Samantha"),
-      (v) => v.name.includes("Karen"),
-      (v) => v.name.includes("Google UK English Female"),
-      (v) => /female/i.test(v.name) && v.lang.startsWith("en"),
-      (v) => v.lang === "en-US",
-      (v) => v.lang.startsWith("en"),
-    ];
-    for (const match of priority) {
-      const v = voices.find(match);
-      if (v) {
-        browserVoice = v;
-        break;
-      }
-    }
-  };
-  speechSynthesis.onvoiceschanged = tryLoad;
-  tryLoad();
-}
-
-function speakBrowser(text) {
-  if (isMuted || !text.trim()) return;
-  speechSynthesis.cancel();
-  const utt = new SpeechSynthesisUtterance(text);
-  if (browserVoice) utt.voice = browserVoice;
-  utt.rate = 0.95;
-  utt.pitch = 1.05;
-  utt.lang = "en-US";
-  utt.onstart = () => micBtn.classList.add("speaking");
-  utt.onend = () => {
-    micBtn.classList.remove("speaking");
+function _playNext() {
+  if (isMuted || audioQueue.length === 0) {
     isSpeaking = false;
-    _drainQueue();
-  };
-  utt.onerror = () => {
     micBtn.classList.remove("speaking");
-    isSpeaking = false;
-    _drainQueue();
-  };
-  isSpeaking = true;
-  speechSynthesis.speak(utt);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Unified speak() — routes to Kokoro or browser, with queue
-// ─────────────────────────────────────────────────────────────────────────────
-
-function speak(text) {
-  const clean = stripMarkdown(text);
-  if (!clean.trim()) return;
-
-  if (isSpeaking) {
-    audioQueue.push(clean);
+    return;
+  }
+  const item = audioQueue.shift();
+  if (!item) {
+    _playNext();
     return;
   }
 
-  _doSpeak(clean);
+  const audio = new Audio(item.url);
+  currentAudio = audio;
+  isSpeaking = true;
+  micBtn.classList.add("speaking");
+
+  const done = () => {
+    URL.revokeObjectURL(item.url);
+    currentAudio = null;
+    _playNext();
+  };
+  audio.onended = done;
+  audio.onerror = done;
+  audio.play().catch(done);
 }
 
-function _doSpeak(text) {
-  if (kokoroAvailable) {
-    speakKokoro(text);
-  } else {
-    speakBrowser(text);
-  }
+// ── Public: enqueue a text chunk for TTS ───────────────────────────────────
+// Each call appends to _fetchChain so fetches always complete in submission order.
+
+function speakChunk(text) {
+  if (isMuted || musicPlaying || !text.trim()) return;
+  _fetchChain = _fetchChain.then(async () => {
+    if (isMuted || musicPlaying) return; // check again after the await
+    const item = await _doFetch(text);
+    if (item) {
+      audioQueue.push(item);
+      if (!isSpeaking) _playNext();
+    }
+  });
 }
 
-function _drainQueue() {
-  if (audioQueue.length > 0 && !isMuted) {
-    const next = audioQueue.shift();
-    setTimeout(() => _doSpeak(next), 120);
-  }
-}
+// ── Stop everything and reset ───────────────────────────────────────────────
 
 function stopSpeaking() {
   if (currentAudio) {
     currentAudio.pause();
     currentAudio = null;
   }
-  speechSynthesis.cancel();
   audioQueue = [];
+  _fetchChain = Promise.resolve(); // discard pending fetches
   isSpeaking = false;
   micBtn.classList.remove("speaking");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sentence buffer — splits streamed text into natural TTS chunks
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _sentenceBuffer = "";
+
+// Sentence-end punctuation or clause-break (comma / semicolon / colon)
+const _BREAK_RE = /([.!?]['")\]]*(?:\s+|$)|[,;:]\s+)/g;
+
+function _flushSentences(text, force) {
+  _sentenceBuffer += text;
+
+  const buf = _sentenceBuffer;
+  const chunks = [];
+  let last = 0;
+
+  _BREAK_RE.lastIndex = 0;
+  let m;
+  while ((m = _BREAK_RE.exec(buf)) !== null) {
+    const end = m.index + m[0].length;
+    const chunk = buf.slice(last, end).trim();
+    if (chunk.length >= MIN_CHUNK) {
+      chunks.push(chunk);
+      last = end;
+    }
+  }
+
+  // Eager flush: if the unsent tail is very long, cut at a word boundary
+  const tail = buf.slice(last);
+  if (tail.length >= EAGER_CHARS) {
+    const cut = tail.lastIndexOf(" ", EAGER_CHARS);
+    const splitAt = cut > MIN_CHUNK ? cut : EAGER_CHARS;
+    const eager = tail.slice(0, splitAt).trim();
+    if (eager.length >= MIN_CHUNK) {
+      chunks.push(eager);
+      last += splitAt;
+    }
+  }
+
+  _sentenceBuffer = buf.slice(last);
+
+  for (const sentence of chunks) speakChunk(stripMarkdown(sentence));
+
+  if (force && _sentenceBuffer.trim().length >= MIN_CHUNK) {
+    speakChunk(stripMarkdown(_sentenceBuffer.trim()));
+    _sentenceBuffer = "";
+  }
+}
+
+function resetSentenceBuffer() {
+  _sentenceBuffer = "";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mute toggle
 // ─────────────────────────────────────────────────────────────────────────────
 
-const ICON_SPEAKER_ON = `
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-  </svg>`;
-
-const ICON_SPEAKER_OFF = `
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-    <line x1="23" y1="9" x2="17" y2="15"/>
-    <line x1="17" y1="9" x2="23" y2="15"/>
-  </svg>`;
+const ICON_SPEAKER_ON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`;
+const ICON_SPEAKER_OFF = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`;
 
 muteBtn.innerHTML = ICON_SPEAKER_ON;
-
 muteBtn.addEventListener("click", () => {
   isMuted = !isMuted;
   muteBtn.classList.toggle("muted", isMuted);
@@ -232,10 +206,240 @@ muteBtn.addEventListener("click", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Music Player
+// ─────────────────────────────────────────────────────────────────────────────
+
+let musicPlaying = false;
+let musicAudio = null;
+let musicPlayerEl = null;
+let _volBeforeMute = 1.0;
+let _isMusicMuted = false;
+
+function createMusicPlayer(title, url, duration, thumbnail) {
+  destroyMusicPlayer(false);
+  musicPlaying = true;
+
+  musicPlayerEl = document.createElement("div");
+  musicPlayerEl.id = "music-player";
+  musicPlayerEl.innerHTML = `
+    <div class="mp-top">
+      ${
+        thumbnail
+          ? `<img class="mp-thumb" src="${thumbnail}" alt="" onerror="this.style.display='none'">`
+          : `<div class="mp-thumb-placeholder">♪</div>`
+      }
+      <div class="mp-title-wrap">
+        <div class="mp-title" title="${escHtml(title)}">${escHtml(title)}</div>
+        <div class="mp-status playing" id="mp-status">▶ PLAYING</div>
+      </div>
+      <button id="mp-stop-btn" title="Stop music">
+        <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+      </button>
+    </div>
+    <div class="mp-seek-row">
+      <span class="mp-time mp-elapsed" id="mp-elapsed">0:00</span>
+      <div class="mp-seek-wrap" id="mp-seek-wrap">
+        <div class="mp-bar-bg">
+          <div class="mp-bar-buffer" id="mp-bar-buffer"></div>
+          <div class="mp-bar-fill"   id="mp-bar-fill"></div>
+        </div>
+        <input type="range" class="mp-seek-input" id="mp-seek-input"
+               min="0" max="${duration || 1000}" step="1" value="0">
+      </div>
+      <span class="mp-time mp-total">${fmtTime(duration)}</span>
+    </div>
+    <div class="mp-controls">
+      <div class="mp-vol-wrap">
+        <button class="mp-vol-icon" id="mp-mute-btn" title="Mute / Unmute">${_svgVolHigh()}</button>
+        <input type="range" class="mp-vol-slider" id="mp-vol-slider" min="0" max="100" step="1" value="100">
+        <span class="mp-vol-pct" id="mp-vol-pct">100%</span>
+      </div>
+      <div class="mp-spacer"></div>
+      <span class="mp-speed-label">SPEED</span>
+      <select class="mp-speed-select" id="mp-speed-select">
+        <option value="0.5">0.5×</option>
+        <option value="0.75">0.75×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option>
+        <option value="2">2×</option>
+      </select>
+    </div>`;
+
+  const footer = document.querySelector("footer");
+  footer.parentElement.insertBefore(musicPlayerEl, footer);
+
+  musicAudio = new Audio(url);
+  musicAudio.crossOrigin = "anonymous";
+  musicAudio.volume = 1.0;
+
+  const seekInput = document.getElementById("mp-seek-input");
+  const barFill = document.getElementById("mp-bar-fill");
+  const barBuffer = document.getElementById("mp-bar-buffer");
+  const elapsedEl = document.getElementById("mp-elapsed");
+  let isSeeking = false;
+
+  musicAudio.addEventListener("timeupdate", () => {
+    if (isSeeking) return;
+    const cur = musicAudio.currentTime;
+    const total = duration || musicAudio.duration || 1;
+    barFill.style.width = `${(cur / total) * 100}%`;
+    seekInput.value = Math.floor(cur);
+    elapsedEl.textContent = fmtTime(Math.floor(cur));
+  });
+  musicAudio.addEventListener("progress", () => {
+    if (!musicAudio.buffered.length) return;
+    const total = duration || musicAudio.duration || 1;
+    const buf = musicAudio.buffered.end(musicAudio.buffered.length - 1);
+    barBuffer.style.width = `${(buf / total) * 100}%`;
+  });
+  seekInput.addEventListener("mousedown", () => {
+    isSeeking = true;
+  });
+  seekInput.addEventListener(
+    "touchstart",
+    () => {
+      isSeeking = true;
+    },
+    { passive: true },
+  );
+  seekInput.addEventListener("input", () => {
+    elapsedEl.textContent = fmtTime(Number(seekInput.value));
+    const total = duration || musicAudio.duration || 1;
+    barFill.style.width = `${(seekInput.value / total) * 100}%`;
+  });
+  seekInput.addEventListener("change", () => {
+    musicAudio.currentTime = Number(seekInput.value);
+    isSeeking = false;
+  });
+  musicAudio.addEventListener("loadedmetadata", () => {
+    seekInput.max = Math.floor(musicAudio.duration || duration);
+  });
+
+  const volSlider = document.getElementById("mp-vol-slider");
+  const volPct = document.getElementById("mp-vol-pct");
+  const mpMuteBtn = document.getElementById("mp-mute-btn");
+
+  volSlider.addEventListener("input", () => {
+    const v = Number(volSlider.value) / 100;
+    musicAudio.volume = v;
+    _volBeforeMute = v;
+    _isMusicMuted = v === 0;
+    volPct.textContent = `${volSlider.value}%`;
+    _updateVolIcon(v);
+  });
+  mpMuteBtn.addEventListener("click", () => {
+    if (_isMusicMuted) {
+      const restore = _volBeforeMute > 0 ? _volBeforeMute : 0.8;
+      musicAudio.volume = restore;
+      volSlider.value = Math.round(restore * 100);
+      volPct.textContent = `${Math.round(restore * 100)}%`;
+      _isMusicMuted = false;
+      _updateVolIcon(restore);
+    } else {
+      _volBeforeMute = musicAudio.volume;
+      musicAudio.volume = 0;
+      volSlider.value = 0;
+      volPct.textContent = "0%";
+      _isMusicMuted = true;
+      _updateVolIcon(0);
+    }
+  });
+  document.getElementById("mp-speed-select").addEventListener("change", (e) => {
+    musicAudio.playbackRate = parseFloat(e.target.value);
+  });
+  musicAudio.addEventListener("ended", () => {
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({ type: "music_ended" }));
+    fetch("/music/stop", { method: "POST" }).catch(() => {});
+    destroyMusicPlayer(false);
+  });
+  musicAudio.addEventListener("error", () => {
+    if (!musicAudio) return;
+    destroyMusicPlayer(false);
+    appendMessage(
+      "aria",
+      "❌ Audio playback error — the stream may have expired. Try playing again.",
+    );
+  });
+  musicAudio.addEventListener("waiting", () =>
+    _setMpStatus("⏳ BUFFERING", false),
+  );
+  musicAudio.addEventListener("playing", () => _setMpStatus("▶ PLAYING", true));
+  musicAudio.addEventListener("pause", () => _setMpStatus("⏸ PAUSED", false));
+  document
+    .getElementById("mp-stop-btn")
+    .addEventListener("click", () => send("stop music"));
+
+  musicAudio.play().catch((err) => {
+    console.warn("[Music] Autoplay blocked:", err);
+    appendMessage(
+      "aria",
+      "⚠ Browser blocked autoplay. Click anywhere on the page, then try again.",
+    );
+    destroyMusicPlayer(false);
+  });
+  window.addEventListener("beforeunload", _onPageUnload);
+}
+
+function _setMpStatus(text, isPlaying) {
+  const el = document.getElementById("mp-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "mp-status" + (isPlaying ? " playing" : "");
+}
+function _updateVolIcon(v) {
+  const btn = document.getElementById("mp-mute-btn");
+  if (!btn) return;
+  btn.innerHTML =
+    v === 0 ? _svgVolOff() : v < 0.5 ? _svgVolLow() : _svgVolHigh();
+}
+function _svgVolHigh() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`;
+}
+function _svgVolLow() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`;
+}
+function _svgVolOff() {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`;
+}
+function destroyMusicPlayer(notifyBackend) {
+  musicPlaying = false;
+  _isMusicMuted = false;
+  if (musicAudio) {
+    const d = musicAudio;
+    musicAudio = null;
+    d.pause();
+    d.src = "";
+    try {
+      d.load();
+    } catch (_) {}
+  }
+  if (musicPlayerEl) {
+    musicPlayerEl.remove();
+    musicPlayerEl = null;
+  }
+  window.removeEventListener("beforeunload", _onPageUnload);
+}
+function _onPageUnload() {
+  navigator.sendBeacon("/music/stop");
+}
+function fmtTime(secs) {
+  if (!secs || isNaN(secs)) return "0:00";
+  return `${Math.floor(secs / 60)}:${String(Math.floor(secs % 60)).padStart(2, "0")}`;
+}
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // WebSocket
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Streaming state
 let currentStreamEl = null;
 let streamBuffer = "";
 
@@ -254,15 +458,14 @@ function connect() {
     if (data.type === "typing") {
       showTyping();
     } else if (data.type === "aria") {
-      // Non-streaming full response (existing behavior)
+      // Non-streamed push: welcome message, reminder fired, etc.
       hideTyping();
       appendMessage("aria", data.text);
-      speak(data.text);
-
-      // --- Streaming support ---
+      if (_ttsReady) speakChunk(stripMarkdown(data.text));
     } else if (data.type === "stream_start") {
       hideTyping();
       streamBuffer = "";
+      resetSentenceBuffer();
       currentStreamEl = appendStreamMessage();
     } else if (data.type === "stream_chunk") {
       streamBuffer += data.text;
@@ -270,9 +473,9 @@ function connect() {
         currentStreamEl.innerHTML = formatText(streamBuffer);
         scrollBottom();
       }
+      if (!data.no_tts && !musicPlaying) _flushSentences(data.text, false);
     } else if (data.type === "stream_end") {
       if (currentStreamEl) {
-        // Stamp a timestamp
         const timeEl = document.createElement("div");
         timeEl.className = "msg-time";
         timeEl.textContent = new Date().toLocaleTimeString([], {
@@ -280,10 +483,15 @@ function connect() {
           minute: "2-digit",
         });
         currentStreamEl.parentElement.appendChild(timeEl);
-        speak(streamBuffer);
+        if (!data.no_tts && !musicPlaying) _flushSentences("", true);
         currentStreamEl = null;
         streamBuffer = "";
       }
+    } else if (data.type === "music_play") {
+      stopSpeaking();
+      createMusicPlayer(data.title, data.url, data.duration, data.thumbnail);
+    } else if (data.type === "music_stop") {
+      destroyMusicPlayer(false);
     }
   };
 }
@@ -295,6 +503,7 @@ function connect() {
 function send(text) {
   text = (text || input.value).trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  _ttsReady = true;
   stopSpeaking();
   appendMessage("user", text);
   ws.send(JSON.stringify({ text }));
@@ -320,7 +529,6 @@ document.querySelectorAll(".qcmd").forEach((btn) => {
 const SpeechRecognition =
   window.SpeechRecognition || window.webkitSpeechRecognition;
 const hasSTT = !!SpeechRecognition;
-
 let wakeRecognizer = null;
 let activeRecognizer = null;
 let isListeningActive = false;
@@ -338,15 +546,12 @@ if (!hasSTT) {
 
 function startWakeListener() {
   if (!hasSTT || isListeningActive) return;
-
   wakeRecognizer = new SpeechRecognition();
   wakeRecognizer.continuous = true;
   wakeRecognizer.interimResults = true;
   wakeRecognizer.lang = "en-US";
   wakeRecognizer.maxAlternatives = 3;
-
   wakeRecognizer.onstart = () => micBtn.classList.add("wake-active");
-
   wakeRecognizer.onresult = (event) => {
     for (let i = event.resultIndex; i < event.results.length; i++) {
       for (let a = 0; a < event.results[i].length; a++) {
@@ -359,13 +564,11 @@ function startWakeListener() {
       }
     }
   };
-
   wakeRecognizer.onerror = () => {};
   wakeRecognizer.onend = () => {
     micBtn.classList.remove("wake-active");
     if (!isListeningActive && wakeEnabled) setTimeout(startWakeListener, 300);
   };
-
   try {
     wakeRecognizer.start();
   } catch (_) {}
@@ -384,9 +587,9 @@ function stopWakeListener() {
 function activateVoiceCommand() {
   if (!hasSTT || isListeningActive) return;
   isListeningActive = true;
+  _ttsReady = true;
   stopSpeaking();
   playBeep(880, 80);
-
   micBtn.classList.add("listening");
   setVoiceStatus("🎤 Listening...");
   input.placeholder = "Listening...";
@@ -398,7 +601,6 @@ function activateVoiceCommand() {
   activeRecognizer.maxAlternatives = 1;
 
   let finalTranscript = "";
-
   activeRecognizer.onresult = (event) => {
     let interim = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -407,12 +609,10 @@ function activateVoiceCommand() {
     }
     input.value = finalTranscript || interim;
   };
-
   activeRecognizer.onerror = (e) => {
     setVoiceStatus(`Voice error: ${e.error}`, 3000);
     endActiveListening();
   };
-
   activeRecognizer.onend = () => {
     const heard = finalTranscript.trim() || input.value.trim();
     endActiveListening();
@@ -422,7 +622,6 @@ function activateVoiceCommand() {
       input.value = "";
     }
   };
-
   try {
     activeRecognizer.start();
   } catch (err) {
@@ -453,7 +652,7 @@ micBtn.addEventListener("click", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Audio feedback
+// Audio feedback beep
 // ─────────────────────────────────────────────────────────────────────────────
 
 function playBeep(freq = 880, duration = 80) {
@@ -497,17 +696,12 @@ function appendMessage(role, text) {
   scrollBottom();
 }
 
-/**
- * Creates an ARIA message bubble whose .msg-body can be updated incrementally
- * during streaming. Returns the .msg-body element for direct mutation.
- */
 function appendStreamMessage() {
-  const label = "AR";
   const wrapper = document.createElement("div");
   wrapper.className = "msg aria";
   const body = document.createElement("div");
   body.className = "msg-body";
-  wrapper.innerHTML = `<div class="msg-avatar">${label}</div>`;
+  wrapper.innerHTML = `<div class="msg-avatar">AR</div>`;
   wrapper.appendChild(body);
   chat.appendChild(wrapper);
   scrollBottom();
@@ -518,26 +712,19 @@ function showTyping() {
   if (typingEl) return;
   typingEl = document.createElement("div");
   typingEl.className = "msg aria";
-  typingEl.innerHTML = `
-    <div class="msg-avatar">AR</div>
-    <div class="msg-body typing-indicator">
-      <span></span><span></span><span></span>
-    </div>`;
+  typingEl.innerHTML = `<div class="msg-avatar">AR</div><div class="msg-body typing-indicator"><span></span><span></span><span></span></div>`;
   chat.appendChild(typingEl);
   scrollBottom();
 }
-
 function hideTyping() {
   if (typingEl) {
     typingEl.remove();
     typingEl = null;
   }
 }
-
 function scrollBottom() {
   chat.scrollTop = chat.scrollHeight;
 }
-
 function setStatus(online) {
   statusDot.className = "status-dot" + (online ? "" : " offline");
   statusText.textContent = online ? "ONLINE" : "RECONNECTING...";
@@ -592,12 +779,12 @@ function stripMarkdown(raw) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Boot — single detectTTSMode() call, wake listener starts after it resolves
+// Boot
 // ─────────────────────────────────────────────────────────────────────────────
 
 connect();
 
-detectTTSMode().then(() => {
+initTTS().then(() => {
   if (hasSTT) {
     setTimeout(() => {
       startWakeListener();

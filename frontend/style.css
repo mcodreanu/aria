@@ -536,3 +536,317 @@ footer {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
 }
+
+/* ── Music Player ─────────────────────────────────────────────────────────── */
+
+#music-player {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--panel);
+  border: 1px solid var(--accent2);
+  border-radius: 2px;
+  margin-bottom: 10px;
+  box-shadow:
+    0 0 0 1px rgba(0, 212, 255, 0.06),
+    0 0 24px rgba(0, 212, 255, 0.05);
+  animation: fadeSlide 0.3s ease-out;
+  overflow: hidden;
+}
+
+/* ── Top row: thumb + title + stop ── */
+.mp-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px 8px;
+}
+
+.mp-thumb {
+  width: 38px;
+  height: 38px;
+  border-radius: 2px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.mp-thumb-placeholder {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  background: var(--aria-msg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  color: var(--accent);
+}
+
+.mp-title-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.mp-title {
+  font-family: "Share Tech Mono", monospace;
+  font-size: 0.82rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mp-status {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+  letter-spacing: 0.08em;
+}
+
+.mp-status.playing {
+  color: var(--accent);
+  animation: mp-blink 2s ease-in-out infinite;
+}
+
+@keyframes mp-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+#mp-stop-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition:
+    border-color 0.2s,
+    color 0.2s,
+    box-shadow 0.2s;
+}
+
+#mp-stop-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+#mp-stop-btn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  box-shadow: 0 0 10px rgba(255, 68, 102, 0.2);
+}
+
+/* ── Seek bar row ── */
+.mp-seek-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+}
+
+.mp-time {
+  font-size: 0.63rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 32px;
+}
+
+.mp-time.mp-total {
+  text-align: right;
+}
+
+/* Seek slider */
+.mp-seek-wrap {
+  flex: 1;
+  position: relative;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.mp-bar-bg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.mp-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 2px;
+  box-shadow: 0 0 6px var(--accent);
+  transition: width 0.4s linear;
+}
+
+.mp-bar-buffer {
+  position: absolute;
+  left: 0;
+  height: 100%;
+  background: rgba(0, 212, 255, 0.15);
+  border-radius: 2px;
+  pointer-events: none;
+  transition: width 0.5s ease;
+}
+
+.mp-seek-input {
+  position: absolute;
+  left: 0;
+  right: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+/* Thumb glow on hover */
+.mp-seek-wrap:hover .mp-bar-fill {
+  box-shadow: 0 0 12px var(--accent);
+}
+
+/* ── Controls row ── */
+.mp-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px 10px;
+}
+
+/* Volume section */
+.mp-vol-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+
+.mp-vol-icon {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  transition: color 0.2s;
+  border-radius: 2px;
+}
+
+.mp-vol-icon:hover {
+  color: var(--accent);
+}
+
+.mp-vol-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Volume slider */
+.mp-vol-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 72px;
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.mp-vol-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  box-shadow: 0 0 6px var(--accent);
+  transition:
+    box-shadow 0.2s,
+    transform 0.1s;
+}
+
+.mp-vol-slider::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 12px var(--accent);
+  transform: scale(1.2);
+}
+
+.mp-vol-slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 0 6px var(--accent);
+}
+
+.mp-vol-pct {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  min-width: 28px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Spacer */
+.mp-spacer {
+  flex: 1;
+}
+
+/* Speed selector */
+.mp-speed-label {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+
+.mp-speed-select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-dim);
+  font-family: "Share Tech Mono", monospace;
+  font-size: 0.68rem;
+  padding: 3px 6px;
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color 0.2s,
+    color 0.2s;
+}
+
+.mp-speed-select:hover,
+.mp-speed-select:focus {
+  border-color: var(--accent2);
+  color: var(--accent);
+}
+
+.mp-speed-select option {
+  background: var(--panel);
+}
