@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ARIA — AI Assistant</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <div class="logo">
+          <div class="logo-ring">
+            <svg
+              viewBox="0 0 44 44"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <circle
+                cx="22"
+                cy="22"
+                r="20"
+                stroke="#00d4ff"
+                stroke-width="1"
+                stroke-dasharray="6 3"
+                opacity="0.6"
+              />
+              <circle
+                cx="22"
+                cy="22"
+                r="14"
+                stroke="#0088cc"
+                stroke-width="0.5"
+                stroke-dasharray="3 4"
+                opacity="0.4"
+              />
+            </svg>
+            <div class="inner-dot"></div>
+          </div>
+          <h1>
+            ARIA <span>Adaptive Reasoning &amp; Intelligent Assistant</span>
+          </h1>
+        </div>
+        <div class="status-bar">
+          <div id="status-dot" class="status-dot offline"></div>
+          <span id="status-text">CONNECTING...</span>
+        </div>
+      </header>
+
+      <div id="chat"></div>
+
+      <footer>
+        <div class="quick-cmds">
+          <button class="qcmd" data-cmd="What time is it?">⏰ Time</button>
+          <button class="qcmd" data-cmd="What's today's date?">📅 Date</button>
+          <button class="qcmd" data-cmd="Calculate 2 ** 32">🔢 Calc</button>
+          <button class="qcmd" data-cmd="List files">📁 Files</button>
+          <button class="qcmd" data-cmd="System info">💻 System</button>
+          <button class="qcmd" data-cmd="Search for latest news in AI">
+            🌐 Web Search
+          </button>
+          <button class="qcmd" data-cmd="wiki Albert Einstein">
+            📖 Wikipedia
+          </button>
+          <button class="qcmd" data-cmd="What can you do?">❓ Help</button>
+          <button class="qcmd" data-cmd="What do you remember?">
+            🧠 Memory
+          </button>
+        </div>
+
+        <div class="input-row">
+          <input
+            id="input"
+            type="text"
+            placeholder="Enter command or ask ARIA something..."
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="send-btn">SEND</button>
+        </div>
+        <p class="hint">
+          Press Enter to send &nbsp;·&nbsp; Try "Who is Nikola Tesla?" or
+          "search for Python tutorials" or "wiki black holes"
+        </p>
+      </footer>
+    </div>
+    <script src="/static/aria.js"></script>
+  </body>
+</html>
