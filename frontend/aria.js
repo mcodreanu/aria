@@ -5,6 +5,7 @@
 const chat = document.getElementById("chat");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("send-btn");
+const stopBtn = document.getElementById("stop-btn");
 const micBtn = document.getElementById("mic-btn");
 const muteBtn = document.getElementById("mute-btn");
 const statusDot = document.getElementById("status-dot");
@@ -24,6 +25,12 @@ let _prefs = {
   tts_speed: 1.0,
   theme: "dark",
   ollama_model: "mistral",
+  voice_mode: "wake",
+  wake_enabled: true,
+  wake_phrases: ["hey aria"],
+  stt_model: "tiny.en",
+  stt_silence_threshold: 0.035,
+  stt_command_timeout: 8.0,
 };
 
 async function loadPrefs() {
@@ -67,6 +74,7 @@ let _fetchChain = Promise.resolve();
 
 const MIN_CHUNK = 8;
 const EAGER_CHARS = 80;
+const MAX_AUDIO_QUEUE = 8;
 const _BREAK_RE = /([.!?]['")\]]*(?:\s+|$)|[,;:]\s+)/g;
 
 async function initTTS() {
@@ -113,6 +121,7 @@ function _playNext() {
   if (isMuted || audioQueue.length === 0) {
     isSpeaking = false;
     micBtn.classList.remove("speaking");
+    maybeResumeLocalWake();
     return;
   }
   const item = audioQueue.shift();
@@ -140,6 +149,7 @@ function speakChunk(text) {
     if (isMuted || musicPlaying) return;
     const item = await _doFetch(text);
     if (item) {
+      if (audioQueue.length >= MAX_AUDIO_QUEUE) audioQueue.shift();
       audioQueue.push(item);
       if (!isSpeaking) _playNext();
     }
@@ -236,25 +246,13 @@ function injectUploadButton() {
   const btn = document.createElement("button");
   btn.id = "upload-btn";
   btn.title = "Upload file";
-  btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+  btn.innerHTML = `<span class="upload-fallback" aria-hidden="true">📎</span>
+  <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
     stroke-linecap="round" stroke-linejoin="round">
     <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66
              l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
   </svg>`;
-  btn.style.cssText = `
-    flex-shrink:0; background:var(--panel); border:1px solid var(--border);
-    border-radius:2px; color:var(--text-dim); cursor:pointer; padding:10px;
-    display:flex; align-items:center; justify-content:center;
-    transition:border-color .2s,color .2s;
-  `;
-  btn.onmouseenter = () => {
-    btn.style.borderColor = "var(--accent2)";
-    btn.style.color = "var(--accent)";
-  };
-  btn.onmouseleave = () => {
-    btn.style.borderColor = "var(--border)";
-    btn.style.color = "var(--text-dim)";
-  };
+  btn.setAttribute("aria-label", "Upload file");
   btn.addEventListener("click", () => fileInputEl.click());
 
   inputRow.insertBefore(btn, inputRow.firstChild);
@@ -620,9 +618,27 @@ function escHtml(str) {
 
 let currentStreamEl = null;
 let streamBuffer = "";
+let isStreaming = false;
+
+function clientSessionId() {
+  let id = localStorage.getItem("aria_client_session_id");
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
+    localStorage.setItem("aria_client_session_id", id);
+  }
+  return id;
+}
+
+function setBusy(active) {
+  isStreaming = active;
+  stopBtn.hidden = !active && !isSpeaking && !musicPlaying;
+  if (active) stopWakeListener();
+  else maybeResumeLocalWake();
+}
 
 function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?client_session_id=${encodeURIComponent(clientSessionId())}`);
   ws.onopen = () => setStatus(true);
   ws.onclose = () => {
     setStatus(false);
@@ -641,6 +657,7 @@ function connect() {
       if (_ttsReady) speakChunk(stripMarkdown(data.text));
     } else if (data.type === "stream_start") {
       hideTyping();
+      setBusy(true);
       streamBuffer = "";
       resetSentenceBuffer();
       currentStreamEl = appendStreamMessage();
@@ -666,6 +683,22 @@ function connect() {
         currentStreamEl = null;
         streamBuffer = "";
       }
+      setBusy(false);
+    } else if (data.type === "stream_cancelled") {
+      hideTyping();
+      stopSpeaking();
+      if (currentStreamEl && !streamBuffer) currentStreamEl.parentElement.remove();
+      currentStreamEl = null;
+      streamBuffer = "";
+      setBusy(false);
+      setVoiceStatus("Stopped.", 1500);
+    } else if (data.type === "error") {
+      hideTyping();
+      appendMessage("aria", `⚠ ${data.message || "Something went wrong."}`);
+      setBusy(false);
+    } else if (data.type === "action_pending") {
+      hideTyping();
+      appendActionCard(data.action);
     } else if (data.type === "file_image") {
       // Inline image from upload
       hideTyping();
@@ -673,8 +706,10 @@ function connect() {
     } else if (data.type === "music_play") {
       stopSpeaking();
       createMusicPlayer(data.title, data.url, data.duration, data.thumbnail);
+      setBusy(true);
     } else if (data.type === "music_stop") {
       destroyMusicPlayer(false);
+      setBusy(false);
     }
   };
 }
@@ -688,6 +723,7 @@ function send(text) {
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
   _ttsReady = true;
   stopSpeaking();
+  setBusy(true);
 
   if (_pendingFile) {
     // Send file question over WS
@@ -717,6 +753,17 @@ function send(text) {
   input.focus();
 }
 
+function stopCurrent() {
+  stopSpeaking();
+  destroyMusicPlayer(false);
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "stop" }));
+  }
+  setBusy(false);
+}
+
+stopBtn.addEventListener("click", stopCurrent);
+
 sendBtn.addEventListener("click", () => send());
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
@@ -732,126 +779,433 @@ document.querySelectorAll(".qcmd").forEach((btn) => {
 // Speech Recognition (STT)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SpeechRecognition =
-  window.SpeechRecognition || window.webkitSpeechRecognition;
-const hasSTT = !!SpeechRecognition;
-let wakeRecognizer = null,
-  activeRecognizer = null,
+const hasLocalVoice = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+let localRecorder = null,
+  localRecordTimer = null,
+  localVadTimer = null,
+  localVadContext = null,
+  localRecordStream = null,
+  localWakeTimer = null,
+  localWakeRecorder = null,
+  localWakeStream = null,
   isListeningActive = false,
-  wakeEnabled = hasSTT;
+  isRecordingLocal = false,
+  isWakeListeningLocal = false,
+  micAccessGranted = false;
 const WAKE_WORD = "hey aria";
-const WAKE_ALTS = ["hey area", "hay aria", "hey arya", "hi aria", "aria"];
+const WAKE_ALTS = [
+  "hey area",
+  "hay aria",
+  "hey arya",
+  "hey ariya",
+  "hi aria",
+  "hi area",
+  "aria",
+];
+const WAKE_TO_COMMAND_DELAY_MS = 250;
+const COMMAND_LISTENING_MS = 8000;
+const COMMAND_MIN_RECORDING_MS = 900;
+const COMMAND_SILENCE_AFTER_SPEECH_MS = 900;
+const COMMAND_SILENCE_WITHOUT_SPEECH_MS = 2600;
+const COMMAND_VOICE_THRESHOLD = 0.035;
+const WAKE_CHUNK_MS = 2500;
+const LOCAL_STT_UNAVAILABLE_MSG =
+  "Local transcription is not installed. Run: pip install faster-whisper";
 
-if (!hasSTT) {
-  micBtn.title = "Speech recognition not supported — use Chrome or Edge";
-  micBtn.style.opacity = "0.4";
-  micBtn.style.cursor = "not-allowed";
-  setVoiceStatus("⚠ Voice input needs Chrome or Edge", 4000);
+async function requestMicAccess() {
+  if (micAccessGranted) return true;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setVoiceStatus("Microphone access is not available in this browser.", 5000);
+    return false;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((track) => track.stop());
+    micAccessGranted = true;
+    return true;
+  } catch (err) {
+    const name = err?.name || "";
+    const blocked =
+      name === "NotAllowedError" || name === "PermissionDeniedError";
+    setVoiceStatus(
+      blocked
+        ? "Microphone access blocked. Allow microphone access, then click the mic."
+        : "Could not access the microphone. Check your input device and try again.",
+      6000,
+    );
+    return false;
+  }
 }
 
-function startWakeListener() {
-  if (!hasSTT || isListeningActive) return;
-  wakeRecognizer = new SpeechRecognition();
-  wakeRecognizer.continuous = true;
-  wakeRecognizer.interimResults = true;
-  wakeRecognizer.lang = "en-US";
-  wakeRecognizer.maxAlternatives = 3;
-  wakeRecognizer.onstart = () => micBtn.classList.add("wake-active");
-  wakeRecognizer.onresult = (event) => {
-    for (let i = event.resultIndex; i < event.results.length; i++)
-      for (let a = 0; a < event.results[i].length; a++) {
-        const alt = event.results[i][a].transcript.toLowerCase().trim();
-        if (alt.includes(WAKE_WORD) || WAKE_ALTS.some((w) => alt.includes(w))) {
-          stopWakeListener();
-          activateVoiceCommand();
-          return;
-        }
-      }
-  };
-  wakeRecognizer.onerror = () => {};
-  wakeRecognizer.onend = () => {
-    micBtn.classList.remove("wake-active");
-    if (!isListeningActive && wakeEnabled) setTimeout(startWakeListener, 300);
-  };
+if (!hasLocalVoice) {
+  micBtn.title = "Voice input needs microphone recording support";
+  micBtn.style.opacity = "0.4";
+  micBtn.style.cursor = "not-allowed";
+  setVoiceStatus("Voice input needs microphone recording support", 4000);
+} else {
+  micBtn.title = "Local voice input";
+}
+
+function preferredAudioMime() {
+  const types = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4",
+    "audio/wav",
+  ];
+  return types.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+}
+
+function audioFilename(mimeType) {
+  if (mimeType.includes("mp4")) return "speech.mp4";
+  if (mimeType.includes("wav")) return "speech.wav";
+  return "speech.webm";
+}
+
+async function transcribeBlob(blob, mimeType) {
+  const form = new FormData();
+  form.append("file", blob, audioFilename(mimeType));
+  const res = await fetch("/stt", { method: "POST", body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || LOCAL_STT_UNAVAILABLE_MSG);
+  return (data.text || "").trim();
+}
+
+function hasWakeWord(text) {
+  const t = normalizeSpeechText(text);
+  const phrases = Array.isArray(_prefs.wake_phrases) && _prefs.wake_phrases.length
+    ? _prefs.wake_phrases
+    : [WAKE_WORD, ...WAKE_ALTS];
+  return (
+    phrases.some((w) => t.includes(normalizeSpeechText(w))) ||
+    WAKE_ALTS.some((w) => t.includes(normalizeSpeechText(w)))
+  );
+}
+
+function normalizeSpeechText(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stripWakeWord(text) {
+  let cleaned = text.trim();
+  const phrases = Array.isArray(_prefs.wake_phrases) && _prefs.wake_phrases.length
+    ? _prefs.wake_phrases
+    : [WAKE_WORD];
+  const wakePatterns = [...phrases, ...WAKE_ALTS].map((wake) =>
+    wake
+      .split(/\s+/)
+      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("[^a-z0-9]+"),
+  );
+  for (const pattern of wakePatterns) {
+    const re = new RegExp(`^\\s*${pattern}\\b\\s*`, "i");
+    if (re.test(cleaned)) {
+      cleaned = cleaned.replace(re, "").trim();
+      break;
+    }
+  }
+  return cleaned.replace(/^[,.:;!?-]+/, "").trim();
+}
+
+function stopCommandVad() {
+  if (localVadTimer) {
+    clearInterval(localVadTimer);
+    localVadTimer = null;
+  }
+  if (localVadContext) {
+    localVadContext.close().catch(() => {});
+    localVadContext = null;
+  }
+}
+
+function startCommandVad(stream) {
+  stopCommandVad();
   try {
-    wakeRecognizer.start();
-  } catch (_) {}
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    localVadContext = new AudioCtx();
+    const source = localVadContext.createMediaStreamSource(stream);
+    const analyser = localVadContext.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+
+    const samples = new Uint8Array(analyser.fftSize);
+    const startedAt = Date.now();
+    let hasSpeech = false;
+    let lastVoiceAt = startedAt;
+
+    localVadTimer = setInterval(() => {
+      if (!localRecorder || localRecorder.state !== "recording") return;
+      analyser.getByteTimeDomainData(samples);
+      let sumSquares = 0;
+      for (const sample of samples) {
+        const centered = (sample - 128) / 128;
+        sumSquares += centered * centered;
+      }
+      const rms = Math.sqrt(sumSquares / samples.length);
+      const now = Date.now();
+      if (rms > Number(_prefs.stt_silence_threshold || COMMAND_VOICE_THRESHOLD)) {
+        hasSpeech = true;
+        lastVoiceAt = now;
+      }
+
+      const elapsed = now - startedAt;
+      const silenceMs = now - lastVoiceAt;
+      if (
+        elapsed >= COMMAND_MIN_RECORDING_MS &&
+        ((hasSpeech && silenceMs >= COMMAND_SILENCE_AFTER_SPEECH_MS) ||
+          (!hasSpeech && elapsed >= COMMAND_SILENCE_WITHOUT_SPEECH_MS))
+      ) {
+        stopLocalRecording();
+      }
+    }, 120);
+  } catch (_) {
+    stopCommandVad();
+  }
+}
+
+function stopLocalRecording() {
+  if (localRecordTimer) {
+    clearTimeout(localRecordTimer);
+    localRecordTimer = null;
+  }
+  stopCommandVad();
+  if (localRecorder && localRecorder.state !== "inactive") {
+    try {
+      localRecorder.stop();
+    } catch (_) {}
+  }
 }
 
 function stopWakeListener() {
-  if (wakeRecognizer) {
-    try {
-      wakeRecognizer.stop();
-    } catch (_) {}
-    wakeRecognizer = null;
+  if (localWakeTimer) {
+    clearTimeout(localWakeTimer);
+    localWakeTimer = null;
   }
+  if (localWakeRecorder && localWakeRecorder.state !== "inactive") {
+    try {
+      localWakeRecorder.stop();
+    } catch (_) {}
+  }
+  localWakeStream?.getTracks().forEach((track) => track.stop());
+  localWakeStream = null;
+  localWakeRecorder = null;
+  isWakeListeningLocal = false;
   micBtn.classList.remove("wake-active");
 }
 
-function activateVoiceCommand() {
-  if (!hasSTT || isListeningActive) return;
-  isListeningActive = true;
-  _ttsReady = true;
-  stopSpeaking();
-  playBeep(880, 80);
-  micBtn.classList.add("listening");
-  setVoiceStatus("🎤 Listening...");
-  input.placeholder = "Listening...";
-
-  activeRecognizer = new SpeechRecognition();
-  activeRecognizer.continuous = false;
-  activeRecognizer.interimResults = true;
-  activeRecognizer.lang = "en-US";
-  activeRecognizer.maxAlternatives = 1;
-
-  let finalTranscript = "";
-  activeRecognizer.onresult = (event) => {
-    let interim = "";
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const t = event.results[i][0].transcript;
-      event.results[i].isFinal ? (finalTranscript += t) : (interim = t);
-    }
-    input.value = finalTranscript || interim;
-  };
-  activeRecognizer.onerror = (e) => {
-    setVoiceStatus(`Voice error: ${e.error}`, 3000);
-    endActiveListening();
-  };
-  activeRecognizer.onend = () => {
-    const heard = finalTranscript.trim() || input.value.trim();
-    endActiveListening();
-    if (heard) send(heard);
-    else {
-      setVoiceStatus("Nothing heard.", 2000);
-      input.value = "";
-    }
-  };
-  try {
-    activeRecognizer.start();
-  } catch (err) {
-    setVoiceStatus("Microphone access denied.", 3000);
-    endActiveListening();
+function maybeResumeLocalWake() {
+  if (
+    hasLocalVoice &&
+    micAccessGranted &&
+    !isWakeListeningLocal &&
+    !isListeningActive &&
+    !isRecordingLocal &&
+    !isStreaming &&
+    !isSpeaking &&
+    !musicPlaying
+  ) {
+    setTimeout(startWakeListener, 500);
   }
 }
 
-function endActiveListening() {
-  isListeningActive = false;
-  micBtn.classList.remove("listening");
-  input.placeholder = "Speak or type — say 'Hey ARIA' to activate voice...";
-  setVoiceStatus("");
-  setTimeout(startWakeListener, 500);
+async function startWakeListener() {
+  if (
+    !hasLocalVoice ||
+    isWakeListeningLocal ||
+    _prefs.wake_enabled === false ||
+    _prefs.voice_mode === "push_to_talk" ||
+    isListeningActive ||
+    isStreaming ||
+    isSpeaking ||
+    musicPlaying
+  )
+    return false;
+  if (!(await requestMicAccess())) return false;
+
+  isWakeListeningLocal = true;
+  micBtn.classList.add("wake-active");
+  input.placeholder = "Speak or type - say 'Hey ARIA'...";
+  setVoiceStatus('Local wake word active: say "Hey ARIA"', 3000);
+  listenForWakeChunk();
+  return true;
 }
 
-micBtn.addEventListener("click", () => {
-  if (!hasSTT) return;
-  if (isListeningActive) {
-    try {
-      activeRecognizer?.stop();
-    } catch (_) {}
-    endActiveListening();
-  } else {
+async function listenForWakeChunk() {
+  if (!isWakeListeningLocal || isListeningActive) return;
+
+  let chunks = [];
+  let mimeType = "";
+  try {
+    localWakeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mimeType = preferredAudioMime();
+    localWakeRecorder = new MediaRecorder(
+      localWakeStream,
+      mimeType ? { mimeType } : undefined,
+    );
+    localWakeRecorder.ondataavailable = (event) => {
+      if (event.data?.size) chunks.push(event.data);
+    };
+    localWakeRecorder.onstop = async () => {
+      const stream = localWakeStream;
+      localWakeStream = null;
+      stream?.getTracks().forEach((track) => track.stop());
+      localWakeRecorder = null;
+
+      if (!isWakeListeningLocal || isListeningActive) return;
+      const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
+      chunks = [];
+      if (!blob.size) {
+        localWakeTimer = setTimeout(listenForWakeChunk, 250);
+        return;
+      }
+
+      try {
+        const text = await transcribeBlob(blob, mimeType);
+        if (hasWakeWord(text)) {
+          const command = stripWakeWord(text);
+          stopWakeListener();
+          if (command) {
+            input.value = "";
+            send(command);
+          } else {
+            setTimeout(startLocalVoiceCommand, WAKE_TO_COMMAND_DELAY_MS);
+          }
+          return;
+        }
+      } catch (err) {
+        stopWakeListener();
+        setVoiceStatus(err.message || LOCAL_STT_UNAVAILABLE_MSG);
+        return;
+      }
+      localWakeTimer = setTimeout(listenForWakeChunk, 250);
+    };
+    localWakeRecorder.start();
+    localWakeTimer = setTimeout(() => {
+      if (localWakeRecorder?.state === "recording") localWakeRecorder.stop();
+    }, WAKE_CHUNK_MS);
+  } catch (err) {
     stopWakeListener();
-    activateVoiceCommand();
+    const blocked =
+      err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError";
+    setVoiceStatus(
+      blocked
+        ? "Microphone access blocked. Allow microphone access, then click the mic."
+        : "Could not access the microphone. Check your input device and try again.",
+      6000,
+    );
+  }
+}
+
+async function startLocalVoiceCommand() {
+  if (!hasLocalVoice || isRecordingLocal) return;
+  if (!(await requestMicAccess())) return;
+
+  let chunks = [];
+  try {
+    stopWakeListener();
+    localRecordStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micAccessGranted = true;
+    const mimeType = preferredAudioMime();
+    localRecorder = new MediaRecorder(
+      localRecordStream,
+      mimeType ? { mimeType } : undefined,
+    );
+
+    localRecorder.ondataavailable = (event) => {
+      if (event.data?.size) chunks.push(event.data);
+    };
+
+    localRecorder.onerror = () => {
+      setVoiceStatus("Could not record microphone audio.", 5000);
+    };
+
+    localRecorder.onstop = async () => {
+      const stream = localRecordStream;
+      localRecordStream = null;
+      stream?.getTracks().forEach((track) => track.stop());
+      localRecorder = null;
+      stopCommandVad();
+      isRecordingLocal = false;
+      isListeningActive = false;
+      micBtn.classList.remove("listening");
+      input.placeholder = "Speak or type - say 'Hey ARIA'...";
+
+      const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
+      chunks = [];
+      if (!blob.size) {
+        setVoiceStatus("Nothing recorded.", 2500);
+        return;
+      }
+
+      setVoiceStatus("Transcribing locally...");
+      try {
+        const heard = await transcribeBlob(blob, mimeType);
+        if (heard) {
+          input.value = "";
+          send(heard);
+        } else {
+          setVoiceStatus("Nothing heard.", 2500);
+        }
+      } catch (err) {
+        setVoiceStatus(err.message || "Could not reach local transcription.", 7000);
+      } finally {
+        setTimeout(startWakeListener, 500);
+      }
+    };
+
+    _ttsReady = true;
+    stopSpeaking();
+    playBeep(880, 80);
+    isRecordingLocal = true;
+    isListeningActive = true;
+    micBtn.classList.remove("unavailable");
+    micBtn.classList.add("listening");
+    input.placeholder = "Listening...";
+    setVoiceStatus("Recording for local transcription...");
+    localRecorder.start();
+    startCommandVad(localRecordStream);
+    const timeoutMs = Math.max(1, Number(_prefs.stt_command_timeout || 8)) * 1000;
+    localRecordTimer = setTimeout(stopLocalRecording, timeoutMs || COMMAND_LISTENING_MS);
+  } catch (err) {
+    stopCommandVad();
+    localRecordStream?.getTracks().forEach((track) => track.stop());
+    localRecordStream = null;
+    localRecorder = null;
+    isRecordingLocal = false;
+    isListeningActive = false;
+    micBtn.classList.remove("listening");
+    const blocked =
+      err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError";
+    setVoiceStatus(
+      blocked
+        ? "Microphone access blocked. Allow microphone access, then click the mic."
+        : "Could not access the microphone. Check your input device and try again.",
+      6000,
+    );
+    setTimeout(startWakeListener, 500);
+  }
+}
+
+micBtn.addEventListener("click", async () => {
+  if (!hasLocalVoice) return;
+  if (isRecordingLocal) {
+    stopLocalRecording();
+    return;
+  }
+  if (isWakeListeningLocal) {
+    stopWakeListener();
+    await startLocalVoiceCommand();
+    return;
+  }
+  if (_prefs.voice_mode === "push_to_talk" || _prefs.wake_enabled === false) {
+    await startLocalVoiceCommand();
+  } else {
+    await startWakeListener();
   }
 });
 
@@ -922,6 +1276,55 @@ function appendImageMessage(name, b64, mime, caption) {
     </div>`;
   chat.appendChild(el);
   scrollBottom();
+}
+
+function appendActionCard(action) {
+  if (!action) return;
+  const now = new Date().toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const el = document.createElement("div");
+  el.className = "msg aria";
+  el.innerHTML = `
+    <div class="msg-avatar">AR</div>
+    <div>
+      <div class="msg-body action-card" data-action-id="${escHtml(action.id)}">
+        <div style="font-size:.72rem;color:var(--accent2);text-transform:uppercase;letter-spacing:.08em">Action pending</div>
+        <div style="margin:6px 0 8px">${escHtml(action.summary || action.type)}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button data-action="approve">Approve</button>
+          <button data-action="reject">Reject</button>
+        </div>
+      </div>
+      <div class="msg-time">${now}</div>
+    </div>`;
+  const body = el.querySelector(".action-card");
+  body.querySelector("[data-action='approve']").addEventListener("click", () =>
+    resolveAction(action.id, "approve", body),
+  );
+  body.querySelector("[data-action='reject']").addEventListener("click", () =>
+    resolveAction(action.id, "reject", body),
+  );
+  chat.appendChild(el);
+  scrollBottom();
+}
+
+async function resolveAction(id, decision, card) {
+  try {
+    const res = await fetch(`/actions/${encodeURIComponent(id)}/${decision}`, {
+      method: "POST",
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Action failed");
+    const result = data.result ? `<div style="margin-top:8px">${formatText(data.result)}</div>` : "";
+    card.innerHTML = `
+      <div style="font-size:.72rem;color:var(--accent2);text-transform:uppercase;letter-spacing:.08em">Action ${data.status}</div>
+      <div style="margin-top:6px">${escHtml(data.summary || data.type)}</div>
+      ${result}`;
+  } catch (err) {
+    setVoiceStatus(err.message || "Action failed", 4000);
+  }
 }
 
 function appendStreamMessage() {
@@ -1050,10 +1453,9 @@ loadPrefs().then(() => {
   injectUploadButton();
   connect();
   initTTS().then(() => {
-    if (hasSTT)
+    if (hasLocalVoice)
       setTimeout(() => {
-        startWakeListener();
-        setVoiceStatus('👂 Listening for "Hey ARIA"...', 3000);
+        setVoiceStatus('Click the mic once to enable local "Hey ARIA".', 5000);
       }, 1200);
   });
 });

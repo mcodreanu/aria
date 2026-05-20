@@ -394,6 +394,41 @@
           <div id="prefs-body"><div class="shimmer"></div></div>
         </div>
 
+        <div class="card" id="card-voice">
+          <div class="card-title"><div class="dot"></div>Voice</div>
+          <div id="voice-body"><div class="shimmer"></div></div>
+        </div>
+
+        <div class="card" id="card-actions">
+          <div class="card-title"><div class="dot"></div>Pending Actions</div>
+          <div id="actions-body"><div class="shimmer"></div></div>
+        </div>
+
+        <div class="card" id="card-tasks">
+          <div class="card-title"><div class="dot"></div>Tasks</div>
+          <div id="tasks-body"><div class="shimmer"></div></div>
+        </div>
+
+        <div class="card" id="card-memory">
+          <div class="card-title"><div class="dot"></div>Typed Memory</div>
+          <div id="memory-body"><div class="shimmer"></div></div>
+        </div>
+
+        <div class="card" id="card-plugins">
+          <div class="card-title"><div class="dot"></div>Plugins</div>
+          <div id="plugins-body"><div class="shimmer"></div></div>
+        </div>
+
+        <div class="card" id="card-workspace">
+          <div class="card-title"><div class="dot"></div>Workspace</div>
+          <div id="workspace-body"><div class="shimmer"></div></div>
+        </div>
+
+        <div class="card full" id="card-diag">
+          <div class="card-title"><div class="dot"></div>Diagnostics</div>
+          <div id="diag-body"><div class="shimmer"></div></div>
+        </div>
+
         <!-- ── Conversation Stats (full width) ── -->
         <div class="card full" id="card-stats">
           <div class="card-title">
@@ -413,11 +448,20 @@
       function pill(ok, label) {
         const cls = ok === true ? "ok" : ok === false ? "err" : "warn";
         const dot = ok === true ? "●" : ok === false ? "●" : "●";
-        return `<span class="pill ${cls}">${dot} ${label}</span>`;
+        return `<span class="pill ${cls}">${dot} ${esc(label)}</span>`;
+      }
+
+      function esc(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
       }
 
       function statRow(label, value) {
-        return `<div class="stat-row"><span>${label}</span><strong>${value}</strong></div>`;
+        return `<div class="stat-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
       }
 
       function barRow(label, pct, val) {
@@ -625,6 +669,121 @@
         loadPrefs();
       }
 
+      async function loadVoice() {
+        const [prefsR, sttR] = await Promise.all([fetch("/prefs"), fetch("/stt/status")]);
+        const p = await prefsR.json();
+        const stt = await sttR.json();
+        document.getElementById("voice-body").innerHTML = `
+      ${pill(stt.available, stt.available ? `STT: ${stt.engine}` : "STT unavailable")}
+      <div class="pref-row">
+        <label>Wake enabled</label>
+        <label class="toggle"><input type="checkbox" ${p.wake_enabled ? "checked" : ""} onchange="savePref('wake_enabled', this.checked)"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="pref-row">
+        <label>Voice mode</label>
+        <select onchange="savePref('voice_mode', this.value)">
+          <option value="wake" ${p.voice_mode === "wake" ? "selected" : ""}>Wake</option>
+          <option value="push_to_talk" ${p.voice_mode === "push_to_talk" ? "selected" : ""}>Push</option>
+        </select>
+      </div>
+      ${statRow("Wake phrases", (p.wake_phrases || []).join(", ") || "hey aria")}
+      ${statRow("Command timeout", `${p.stt_command_timeout || 8}s`)}`;
+      }
+
+      async function loadActions() {
+        const r = await fetch("/actions?status=pending");
+        const d = await r.json();
+        const rows = d.actions || [];
+        const trust = d.trust || [];
+        document.getElementById("actions-body").innerHTML = (rows.length
+          ? rows.slice(0, 6).map((a) => `
+            <div class="stat-row"><span>${esc(a.summary)}</span><strong>${esc(a.risk)}</strong></div>
+            <div class="model-row">
+              <button onclick="resolveDashAction('${esc(a.id)}','approve')">APPROVE</button>
+              <button onclick="resolveDashAction('${esc(a.id)}','reject')">REJECT</button>
+            </div>`).join("")
+          : `<span style="color:var(--text-dim)">No pending actions</span>`) +
+          `<div style="margin-top:10px;font-size:.72rem;color:var(--accent2);text-transform:uppercase">Trusted approvals</div>` +
+          (trust.length
+            ? trust.slice(0, 6).map((t) => `
+              <div class="stat-row"><span>${esc(t.tool)}</span><strong>${esc(t.scope)}</strong></div>
+              <div class="model-row"><button onclick="revokeTrust('${esc(t.tool)}','${esc(t.scope)}')">REVOKE</button></div>`).join("")
+            : `<span style="color:var(--text-dim)">None yet</span>`);
+      }
+
+      async function resolveDashAction(id, decision) {
+        await fetch(`/actions/${id}/${decision}`, { method: "POST" });
+        loadActions();
+      }
+
+      async function revokeTrust(tool, scope) {
+        await fetch(`/actions/trust?tool=${encodeURIComponent(tool)}&scope=${encodeURIComponent(scope)}`, { method: "DELETE" });
+        loadActions();
+      }
+
+      async function loadTasks() {
+        const r = await fetch("/tasks");
+        const d = await r.json();
+        const rows = (d.tasks || []).filter((t) => t.status !== "done").slice(0, 8);
+        document.getElementById("tasks-body").innerHTML = rows.length
+          ? rows.map((t) => statRow(`[${t.status}] ${t.title}`, t.priority)).join("")
+          : `<span style="color:var(--text-dim)">No open tasks</span>`;
+      }
+
+      async function loadMemoryPanel() {
+        const r = await fetch("/memory");
+        const d = await r.json();
+        const rows = (d.records || []).slice(0, 8);
+        document.getElementById("memory-body").innerHTML = rows.length
+          ? rows.map((m) => statRow(`${m.type}: ${m.key}`, m.value)).join("")
+          : `<span style="color:var(--text-dim)">No typed memory records</span>`;
+      }
+
+      async function loadPlugins() {
+        const r = await fetch("/plugins");
+        const d = await r.json();
+        const rows = d.plugins || [];
+        document.getElementById("plugins-body").innerHTML = rows.length
+          ? rows.map((p) => `
+            <div class="stat-row"><span>${esc(p.name)}</span><strong>${p.enabled ? "enabled" : "disabled"}</strong></div>
+            <div class="model-row"><button onclick="togglePlugin('${esc(p.id)}', ${!p.enabled})">${p.enabled ? "DISABLE" : "ENABLE"}</button></div>`).join("")
+          : `<span style="color:var(--text-dim)">No plugins installed</span>`;
+      }
+
+      async function togglePlugin(id, enabled) {
+        await fetch(`/plugins/${id}/${enabled ? "enable" : "disable"}`, { method: "POST" });
+        loadPlugins();
+      }
+
+      async function loadWorkspace() {
+        const r = await fetch("/workspace/files");
+        const d = await r.json();
+        document.getElementById("workspace-body").innerHTML = `
+          ${statRow("Indexed files", (d.files || []).length)}
+          <div class="model-row"><button onclick="reindexWorkspace()">REINDEX</button></div>`;
+      }
+
+      async function reindexWorkspace() {
+        await fetch("/workspace/index", { method: "POST" });
+        loadWorkspace();
+      }
+
+      async function loadDiagnostics() {
+        const r = await fetch("/diagnostics");
+        const d = await r.json();
+        document.getElementById("diag-body").innerHTML = `
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
+            ${statRow("Python", `${d.python.version}`)}
+            ${statRow("Executable", d.python.executable)}
+            ${statRow("STT", d.stt.available ? d.stt.engine : "unavailable")}
+            ${statRow("TTS cache", d.tts.cache_items)}
+            ${statRow("Ollama", d.ollama.available ? d.ollama.model : "offline")}
+            ${statRow("Pending actions", d.actions.pending)}
+            ${statRow("Open tasks", d.tasks.open)}
+            ${statRow("Workspace files", d.workspace.indexed_files)}
+          </div>`;
+      }
+
       // ── Conversation stats card ───────────────────────────────────────────────────
 
       async function loadStats() {
@@ -745,6 +904,13 @@
         loadSysInfo();
         loadOllama();
         loadPrefs();
+        loadVoice();
+        loadActions();
+        loadTasks();
+        loadMemoryPanel();
+        loadPlugins();
+        loadWorkspace();
+        loadDiagnostics();
         loadStats();
       }
 
@@ -753,6 +919,8 @@
       setInterval(() => {
         loadServices();
         loadSysInfo();
+        loadActions();
+        loadDiagnostics();
       }, 30000);
     </script>
   </body>

@@ -368,7 +368,8 @@ footer {
   color: var(--text-dim);
 }
 
-#send-btn {
+#send-btn,
+#stop-btn {
   background: transparent;
   border: 1px solid var(--accent);
   color: var(--accent);
@@ -384,11 +385,22 @@ footer {
     box-shadow 0.2s;
   white-space: nowrap;
 }
-#send-btn:hover {
+#stop-btn {
+  border-color: var(--danger);
+  color: var(--danger);
+  padding-inline: 14px;
+}
+#send-btn:hover,
+#stop-btn:hover {
   background: var(--glow);
   box-shadow: 0 0 16px var(--glow-hard);
 }
-#send-btn:active {
+#stop-btn:hover {
+  background: rgba(255, 68, 102, 0.08);
+  box-shadow: 0 0 16px rgba(255, 68, 102, 0.18);
+}
+#send-btn:active,
+#stop-btn:active {
   transform: scale(0.97);
 }
 
@@ -425,6 +437,7 @@ footer {
 }
 
 /* ── Voice buttons ── */
+#upload-btn,
 #mic-btn,
 #mute-btn {
   flex-shrink: 0;
@@ -443,12 +456,37 @@ footer {
     box-shadow 0.2s,
     background 0.2s;
 }
+#upload-btn {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+  display: inline-flex;
+  font-size: 19px;
+  line-height: 1;
+}
+#upload-btn .upload-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+}
+#upload-btn svg {
+  display: none;
+}
+#upload-btn svg,
 #mic-btn svg,
 #mute-btn svg {
   width: 18px;
   height: 18px;
 }
 
+#upload-btn:hover {
+  border-color: var(--accent2);
+  color: var(--accent);
+}
 #mic-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
@@ -499,6 +537,31 @@ footer {
   border-color: var(--success);
   color: var(--success);
   box-shadow: 0 0 12px rgba(0, 255, 170, 0.3);
+}
+
+#mic-btn.unavailable {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-color: rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.45);
+  box-shadow: none;
+  animation: none;
+}
+
+.action-card button {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  cursor: pointer;
+  font-family: "Share Tech Mono", monospace;
+  font-size: 0.72rem;
+  padding: 4px 10px;
+  border-radius: 2px;
+}
+
+.action-card button[data-action="reject"] {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 /* ── Voice status bar ── */

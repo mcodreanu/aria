@@ -8,6 +8,7 @@ __pycache__/
 
 # Virtual environments
 .venv/
+backend/vendor/
 venv/
 env/
 ENV/
@@ -21,6 +22,16 @@ dist/
 .eggs/
 
 # ── ARIA runtime data ─────────────────────────────────────────────────────────
+# Runtime data lives under backend/data in the current app layout.
+backend/data/
+backend/data/workspace/
+backend/data/aria_uploads/
+backend/data/aria_uploads/.uploads.json
+backend/data/aria_prefs.json
+backend/data/aria_memory.json
+backend/data/conversations.db*
+backend/data/*.tmp
+
 # Persistent memory — contains personal data (name, notes, etc.)
 aria_memory.json
 aria_memory.json.tmp

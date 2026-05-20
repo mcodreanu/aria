@@ -10,7 +10,7 @@ _A local, Jarvis-like AI assistant — no cloud, no API keys required._
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![WebSocket](https://img.shields.io/badge/WebSocket-realtime-00d4ff?style=flat-square)
 ![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-black?style=flat-square)
-![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
+![License](https://img.shields.io/badge/license-GPLv3--or--later-green?style=flat-square)
 ![No API Key](https://img.shields.io/badge/API%20key-not%20required-brightgreen?style=flat-square)
 
 </div>
@@ -24,8 +24,10 @@ ARIA is a fully self-contained AI assistant that runs on your machine. It answer
 - **No cloud, no API keys** — uses DuckDuckGo, Wikipedia, and your own local models
 - **Local LLM fallback** — integrates with [Ollama](https://ollama.com) (Mistral, Llama 3, Phi-3, and more)
 - **Streaming responses** — LLM output appears token-by-token as it generates, just like ChatGPT; rule-based responses are instant
-- **Conversation history** — the LLM always receives the last 5 exchanges as context, so follow-up questions and multi-turn conversations work naturally
+- **Conversation history + summaries** — recent turns, relevant facts, and compact session summaries are injected into LLM prompts for better follow-ups
 - **Rule-based fast lane** — common intents (time, files, search, math) are answered instantly without hitting the LLM
+- **Safer local tools** — file commands are sandboxed, uploads use opaque IDs, and sensitive system actions ask for confirmation
+- **Cancellable responses** — stop an active stream, TTS queue, or music playback from the UI
 - **Kokoro TTS** — natural, local text-to-speech with browser fallback
 - **Wake word** — say "Hey ARIA" to activate voice input hands-free
 - **Persistent memory** — remembers your name and notes across restarts
@@ -67,12 +69,12 @@ ARIA online. All systems operational. How can I assist you?
 | ------------------- | -------------------------------------------------------------------------------- |
 | 🤖 **Local LLM**    | Free-form chat, code generation, reasoning — powered by Ollama                   |
 | 📡 **Streaming**    | LLM responses stream token-by-token; no frozen wait                              |
-| 🧵 **Context**      | LLM always receives last 5 exchanges — follow-ups and multi-turn chat work       |
+| 🧵 **Context**      | Recent turns + summaries + relevant memory facts for multi-turn chat             |
 | 🌐 **Web Search**   | `search for black holes` · `google best Python frameworks`                       |
 | 📖 **Wikipedia**    | `wiki Alan Turing` · `What is quantum computing?` · `Who was Cleopatra?`         |
 | 🕐 **Time & Date**  | `What time is it?` · `What day is today?`                                        |
 | 🔢 **Calculator**   | `Calculate 15 * 8` · `sqrt(144)` · `2 ** 32` · `sin(pi/2)`                       |
-| 📁 **Files**        | `List files` · `Read file notes.txt` · `Create file todo.txt with content ...`   |
+| 📁 **Files**        | Sandboxed `List files` · `Read file notes.txt` · `Create file todo.txt ...`      |
 | 🖥️ **Open Apps**    | `Open calculator` · `Open browser` · `Open terminal`                             |
 | 💻 **System Info**  | `System info` — OS, processor, Python version, hostname                          |
 | 🧠 **Memory**       | `My name is Alex` · `Remember that deadline is Friday` · `What do you remember?` |
@@ -89,6 +91,7 @@ ARIA online. All systems operational. How can I assist you?
 - pip
 - (Optional) [Ollama](https://ollama.com/download) for local LLM support
 - (Optional) `kokoro-onnx` + `soundfile` for natural TTS
+- (Optional) `faster-whisper` for fully local mic input and wake-word transcription
 
 ### Install & Run
 
@@ -98,14 +101,27 @@ git clone https://github.com/your-username/aria.git
 cd aria
 
 # Install dependencies
-pip install -r backend/requirements.txt
+pip install -r backend/sysinfo/requirements.txt
 
 # Start ARIA
 cd backend
-uvicorn main:app --reload --port 8000
+python -m uvicorn main:app --reload --port 8000
 ```
 
 Then open **http://localhost:8000** in your browser.
+
+On Windows PowerShell, from the repo root:
+
+```powershell
+cd backend
+..\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000
+```
+
+Or as a one-liner:
+
+```powershell
+Push-Location backend; ..\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000
+```
 
 That's it. ARIA works out of the box without Ollama or Kokoro. Both are optional upgrades.
 
@@ -123,7 +139,7 @@ Ollama gives ARIA real reasoning ability for anything the rule engine doesn't co
 ollama pull mistral        # recommended — fast 7B, great general responses
 
 # 3. Start ARIA as normal — it detects Ollama automatically
-cd backend && uvicorn main:app --reload --port 8000
+cd backend && python -m uvicorn main:app --reload --port 8000
 ```
 
 The startup log will confirm: `Ollama online — active model: mistral`.
@@ -161,13 +177,13 @@ Every response goes through a single `process_stream()` async generator in `aria
 
 **Rule-based handlers** (greetings, date, calculator, search, files…) are instant — they yield a single chunk containing the full response. No fake streaming delay is added.
 
-**LLM responses** (Ollama) stream token-by-token via an async generator that wraps Ollama's streaming HTTP API. The blocking I/O runs in a thread-pool executor so the event loop stays free for other connections.
+**LLM responses** (Ollama) stream token-by-token through async `httpx` clients, so the event loop stays responsive and active streams can be cancelled. Search and Wikipedia lookups also use cached async HTTP paths during WebSocket chat.
 
 ---
 
 ## How Conversation History Works
 
-Every user message and ARIA response is appended to an in-memory history list inside the `Memory` object. When the LLM is invoked, `memory.recent(10)` (the last 5 exchanges) is passed to `ollama.py` which injects it into the prompt:
+Every user message and ARIA response is appended to an in-memory history list inside the `Memory` object and persisted to SQLite for the history UI. When the LLM is invoked, ARIA builds context from session summaries, relevant long-term facts, and recent turns:
 
 ```
 [System]
@@ -187,6 +203,8 @@ What did I just ask you to write?
 
 This means follow-up questions, pronoun references ("what about that?"), and corrections all work naturally across a conversation.
 
+Older sessions are compacted into extractive summaries in SQLite, while explicit facts such as "remember that..." and preferences are saved to persistent memory.
+
 ---
 
 ## Enabling Natural TTS (Kokoro)
@@ -199,6 +217,18 @@ Model files (~85 MB) are downloaded automatically on first use. If Kokoro is not
 
 ---
 
+## Enabling Local Voice Input
+
+ARIA records microphone audio in the browser and sends it to the backend for local Whisper transcription. The wake word and command text both use this local path; no browser speech-recognition service is used.
+
+```bash
+pip install faster-whisper
+```
+
+The first transcription downloads the `tiny.en` model unless it is already cached. Set `ARIA_STT_MODEL`, `ARIA_STT_DEVICE`, or `ARIA_STT_COMPUTE_TYPE` to customize the local Whisper runtime.
+
+---
+
 ## Configuration
 
 Copy `.env.example` to `.env` and edit as needed. No variables are required.
@@ -207,10 +237,37 @@ Copy `.env.example` to `.env` and edit as needed. No variables are required.
 cp .env.example .env
 ```
 
-| Variable       | Default                  | Description                   |
-| -------------- | ------------------------ | ----------------------------- |
-| `OLLAMA_HOST`  | `http://localhost:11434` | URL of your Ollama server     |
-| `OLLAMA_MODEL` | `mistral`                | Model to use for LLM fallback |
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OLLAMA_HOST` | `http://localhost:11434` | URL of your Ollama server |
+| `OLLAMA_MODEL` | `mistral` | Model to use for LLM fallback |
+| `OLLAMA_VISION_MODEL` | empty | Optional vision model, e.g. `llava`, for image uploads/screenshots |
+| `OLLAMA_CONNECT_TIMEOUT` | `3.0` | Fast health-check timeout in seconds |
+| `OLLAMA_GENERATE_TIMEOUT` | `60.0` | LLM generation/stream timeout in seconds |
+| `ARIA_WORKSPACE_ROOT` | `backend/data/workspace` | Safe root for file read/write/delete commands |
+| `ARIA_ALLOW_ABSOLUTE_PATHS` | `0` | Set to `1` to allow absolute paths that still resolve inside the workspace |
+| `ARIA_CORS_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | Comma-separated allowed browser origins |
+| `ARIA_UPLOAD_MAX_BYTES` | `20971520` | Maximum uploaded file size |
+| `ARIA_UPLOAD_MAX_TEXT_CHARS` | `131072` | Maximum extracted text sent to file analysis |
+| `ARIA_UPLOAD_MAX_IMAGE_BYTES` | `4194304` | Maximum image bytes converted to base64 |
+| `ARIA_UPLOAD_MAX_TRANSFORM_CHARS` | `262144` | Maximum transformed output saved for download |
+| `ARIA_SESSION_TTL_SECONDS` | `3600` | In-memory chat session lifetime |
+| `ARIA_MAX_SESSIONS` | `200` | Maximum retained in-memory sessions |
+| `ARIA_TTS_VOICE` | `af_heart` | Default Kokoro voice |
+| `ARIA_TTS_SPEED` | `1.0` | Default TTS speed |
+| `ARIA_TTS_CACHE_MAX_ITEMS` | `64` | Maximum synthesized WAV responses cached in memory |
+| `ARIA_STT_MODEL` | `tiny.en` | Local Whisper model for mic fallback |
+| `ARIA_STT_DEVICE` | `cpu` | Device for faster-whisper |
+| `ARIA_STT_COMPUTE_TYPE` | `int8` | Compute type for faster-whisper |
+| `ARIA_HEALTH_CACHE_SECONDS` | `5.0` | TTL for expensive health/status checks |
+
+### Security Defaults
+
+- File operations are limited to `ARIA_WORKSPACE_ROOT`.
+- Upload responses expose opaque IDs, not local filesystem paths.
+- Browser access is local-only by default through `ARIA_CORS_ORIGINS`.
+- Write/system actions such as file delete, app launch, clipboard, and screenshot ask for browser confirmation.
+- The Stop button cancels active response streaming and clears queued speech.
 
 ---
 
@@ -224,7 +281,7 @@ User input
     ├─ Greeting / Identity / Name / Farewell / Thanks / How are you
     ├─ Time · Date
     ├─ Calculator (safe sandboxed eval via asteval)
-    ├─ File operations · Open apps · System info
+    ├─ Sandboxed file operations · Open apps · System info
     ├─ Memory commands
     ├─ Explicit: "wiki ..." / "search for ..."
     ├─ Smart question fallback → Wikipedia + DuckDuckGo
@@ -242,20 +299,28 @@ Rule-based handlers at the top are instant. The LLM is only reached when nothing
 ```
 aria/
 ├── backend/
-│   ├── main.py          # FastAPI server · WebSocket · streaming protocol · session management
+│   ├── main.py          # FastAPI server · routes · WebSocket · session management
 │   ├── aria_brain.py    # NLP pipeline · all intent handlers · process() + process_stream()
-│   ├── ollama.py        # Ollama integration · generate() + generate_stream_async()
+│   ├── settings.py      # Central env/runtime settings
+│   ├── health.py        # TTL health/status cache
+│   ├── tool_policy.py   # Tool risk levels and confirmation policy
+│   ├── ws_protocol.py   # WebSocket message type constants
+│   ├── memory_extract.py# Explicit memory extraction + relevant fact retrieval
+│   ├── ollama.py        # Async Ollama integration · generate_stream_async()
 │   ├── memory.py        # Session history (in-RAM) + persistent facts (aria_memory.json)
-│   ├── search.py        # DuckDuckGo instant answers · Wikipedia REST API
-│   ├── tools.py         # Time · safe calculator · file CRUD · open apps · system info
-│   ├── tts.py           # Kokoro TTS · thread-safe engine loader · WAV synthesis
-│   ├── aria_memory.json # Auto-created on first run · stores your name & notes
-│   └── requirements.txt
+│   ├── search.py        # Cached async DuckDuckGo + Wikipedia lookups
+│   ├── tools.py         # Time · safe calculator · sandboxed file CRUD · apps
+│   ├── data/            # Runtime data, ignored by git
+│   └── sysinfo/
+│       ├── requirements.txt
+│       └── ...
 ├── frontend/
 │   ├── index.html       # Sci-fi holographic UI · quick-command buttons
 │   ├── style.css        # Dark theme · cyan glow · animated logo · responsive
 │   └── aria.js          # WebSocket client · streaming handler · TTS · STT · wake word
 ├── .env.example         # Documented environment variables
+├── tests/
+│   └── test_security_core.py
 ├── .gitignore
 └── README.md
 ```
@@ -289,11 +354,13 @@ Each handler receives the lowercased input and the memory object. Return a strin
 | ------ | ---------------- | --------------------------------------------------- |
 | `GET`  | `/`              | Serves the frontend                                 |
 | `GET`  | `/health`        | Server status, TTS mode, LLM model, active sessions |
+| `GET`  | `/stt/status`    | Whether local speech recognition is available       |
+| `POST` | `/stt`           | Transcribe uploaded mic audio                       |
 | `GET`  | `/tts/status`    | Whether Kokoro is available                         |
 | `POST` | `/tts`           | Synthesize text → WAV audio                         |
 | `GET`  | `/ollama/status` | Ollama availability, active model, pulled models    |
 | `GET`  | `/ollama/models` | List of locally-pulled Ollama models                |
-| `WS`   | `/ws`            | Main chat WebSocket (streaming protocol)            |
+| `WS`   | `/ws?client_session_id=...` | Main chat WebSocket with optional session resume |
 
 ### WebSocket Streaming Protocol
 
@@ -305,8 +372,15 @@ Messages sent from server → client:
 | `stream_start` | —              | Clears typing, opens response bubble          |
 | `stream_chunk` | `text: string` | Each chunk of the response (1–N per response) |
 | `stream_end`   | —              | Response complete; triggers TTS               |
+| `stream_cancelled` | —          | Active response was stopped by the user       |
+| `error`        | `message`      | Structured recoverable error                  |
+| `music_play`   | `title`, `url`, `duration`, `thumbnail` | Start browser music playback |
+| `music_stop`   | —              | Stop browser music playback                   |
+| `file_image`   | `name`, `mime`, `b64`, `caption` | Inline uploaded image response |
 
 Rule-based responses send exactly one `stream_chunk`. LLM responses send many.
+
+Messages sent from client → server include `{ "text": "..." }`, `{ "type": "stop" }`, `{ "type": "music_ended" }`, and `{ "type": "file_ask", "file": {...}, "question": "..." }`.
 
 ---
 
@@ -322,7 +396,17 @@ ARIA saves facts to `backend/aria_memory.json` automatically:
 }
 ```
 
-The file is created on first use and survives server restarts. Conversation history (for LLM context) is in-RAM only and resets on reconnect. Say **"clear memory"** to wipe persisted facts and start fresh.
+The file is created on first use and survives server restarts. Conversation history is stored in `backend/data/conversations.db`, searchable from `/history`, and summarized for long-running context. Say **"clear memory"** to wipe persisted facts and start fresh.
+
+---
+
+## Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_security_core.py -q
+```
+
+The current regression tests cover file sandboxing, app allowlisting, upload metadata privacy, preference validation, conversation storage, summaries, and intent routing.
 
 ---
 
@@ -334,10 +418,12 @@ The file is created on first use and survives server restarts. Conversation hist
 - [x] Local LLM fallback (Ollama — Mistral, Llama 3, Phi-3…)
 - [x] Conversation history passed to LLM (last 5 exchanges)
 - [x] Streaming LLM responses (token-by-token output)
-- [ ] Persistent conversation history with search
+- [x] Persistent conversation history with search
+- [x] Sandboxed file tools and opaque upload IDs
+- [x] Stop/cancel streaming responses
 - [ ] Plugin system for custom skills
 - [ ] Typed memory facts (structured notes, deadlines, preferences)
-- [ ] `/history` endpoint + conversation history panel in UI
+- [x] `/history` endpoint + conversation history panel in UI
 
 ---
 
@@ -349,7 +435,9 @@ Pull requests are welcome. For major changes, open an issue first to discuss wha
 
 ## License
 
-MIT — do whatever you want with it.
+GNU GPL v3.0 or later — open source, with copyleft protections. You can use, study, modify, and share ARIA, but redistributed versions and derivatives must keep the same license and provide source code.
+
+See [LICENSE](LICENSE).
 
 ---
 
