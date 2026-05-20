@@ -7,6 +7,7 @@ httpx
 yt-dlp
 kokoro-onnx
 soundfile
+faster-whisper
 apscheduler
 pyperclip
 mss
@@ -15,3 +16,4 @@ icalendar
 pymupdf
 psutil
 python-multipart
+pytest

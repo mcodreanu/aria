@@ -1,0 +1,13 @@
+"""WebSocket message type constants shared by backend route code."""
+
+ARIA = "aria"
+ERROR = "error"
+FILE_IMAGE = "file_image"
+MUSIC_PLAY = "music_play"
+MUSIC_STOP = "music_stop"
+STREAM_CANCELLED = "stream_cancelled"
+STREAM_CHUNK = "stream_chunk"
+STREAM_END = "stream_end"
+STREAM_START = "stream_start"
+TYPING = "typing"
+USER = "user"

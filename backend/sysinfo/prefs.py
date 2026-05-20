@@ -13,10 +13,11 @@ Keys:
 """
 
 import json
-import os
 import logging
+import os
 from pathlib import Path
 from memory import DATA_DIR
+from settings import OLLAMA_MODEL, TTS_SPEED, TTS_VOICE
 
 logger = logging.getLogger("aria.prefs")
 
@@ -24,10 +25,16 @@ PREFS_FILE = DATA_DIR / "aria_prefs.json"
 
 DEFAULTS = {
     "muted":        False,
-    "tts_voice":    "af_heart",
-    "tts_speed":    1.0,
+    "tts_voice":    TTS_VOICE,
+    "tts_speed":    TTS_SPEED,
     "theme":        "dark",
-    "ollama_model": os.getenv("OLLAMA_MODEL", "mistral"),
+    "ollama_model": OLLAMA_MODEL,
+    "voice_mode": "wake",
+    "wake_enabled": True,
+    "wake_phrases": ["hey aria"],
+    "stt_model": "tiny.en",
+    "stt_silence_threshold": 0.035,
+    "stt_command_timeout": 8.0,
 }
 
 
@@ -79,6 +86,27 @@ def update(updates: dict) -> dict:
     prefs = _load()
     for k, v in updates.items():
         if k in DEFAULTS:
+            if k == "tts_speed":
+                try:
+                    v = max(0.5, min(2.0, float(v)))
+                except (TypeError, ValueError):
+                    raise ValueError("tts_speed must be a number")
+            if k == "theme" and v not in {"dark", "light"}:
+                raise ValueError("theme must be 'dark' or 'light'")
+            if k == "voice_mode" and v not in {"wake", "push_to_talk"}:
+                raise ValueError("voice_mode must be 'wake' or 'push_to_talk'")
+            if k == "wake_enabled":
+                v = bool(v)
+            if k == "wake_phrases":
+                if isinstance(v, str):
+                    v = [p.strip() for p in v.split(",") if p.strip()]
+                if not isinstance(v, list):
+                    raise ValueError("wake_phrases must be a list or comma-separated string")
+            if k in {"stt_silence_threshold", "stt_command_timeout"}:
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    raise ValueError(f"{k} must be a number")
             prefs[k] = v
         else:
             logger.warning(f"[Prefs] Ignoring unknown key: {k!r}")

@@ -3,6 +3,9 @@ import math
 import os
 import platform
 import subprocess
+from pathlib import Path
+
+from settings import ALLOW_ABSOLUTE_WORKSPACE_PATHS, WORKSPACE_ROOT
 
 
 # ──────────────────────────────────────────────
@@ -95,42 +98,70 @@ def calculate(expression: str) -> str:
 # FILE SYSTEM
 # ──────────────────────────────────────────────
 
-def list_directory(path: str = ".") -> str:
-    path = os.path.expanduser(path)
+def _workspace_path(user_path: str = ".") -> Path:
+    raw = Path(os.path.expanduser(user_path or "."))
+    if raw.is_absolute():
+        if not ALLOW_ABSOLUTE_WORKSPACE_PATHS:
+            raise PermissionError("Absolute paths are disabled.")
+        candidate = raw.resolve()
+    else:
+        candidate = (WORKSPACE_ROOT / raw).resolve()
+
+    root = WORKSPACE_ROOT.resolve()
+    if candidate != root and root not in candidate.parents:
+        raise PermissionError("That path is outside ARIA's allowed workspace.")
+    return candidate
+
+
+def _display_path(path: Path) -> str:
     try:
-        entries = os.listdir(path)
+        rel = path.resolve().relative_to(WORKSPACE_ROOT.resolve())
+        return "." if str(rel) == "." else str(rel)
+    except ValueError:
+        return str(path)
+
+
+def list_directory(path: str = ".") -> str:
+    try:
+        safe_path = _workspace_path(path)
+        entries = os.listdir(safe_path)
         if not entries:
-            return f"The directory '{path}' is empty."
-        folders = [e for e in entries if os.path.isdir(os.path.join(path, e))]
-        files   = [e for e in entries if os.path.isfile(os.path.join(path, e))]
-        result  = f"Contents of **{path}**:\n"
+            return f"The directory `{_display_path(safe_path)}` is empty."
+        folders = [e for e in entries if (safe_path / e).is_dir()]
+        files   = [e for e in entries if (safe_path / e).is_file()]
+        result  = f"Contents of **{_display_path(safe_path)}**:\n"
         if folders:
             result += "  📁 Folders: " + ", ".join(folders[:15]) + "\n"
         if files:
             result += "  📄 Files: " + ", ".join(files[:15])
         return result.strip()
-    except PermissionError:
-        return f"Access denied to '{path}'."
+    except PermissionError as e:
+        return f"Access denied: {e}"
     except FileNotFoundError:
         return f"Directory '{path}' not found."
 
 
 def create_file_tool(filename: str, content: str = "") -> str:
     try:
-        filename = os.path.expanduser(filename)
-        with open(filename, "w") as f:
+        safe_path = _workspace_path(filename)
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(safe_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"File **{filename}** created successfully."
+        return f"File **{_display_path(safe_path)}** created successfully."
+    except PermissionError as e:
+        return f"Access denied: {e}"
     except Exception as e:
         return f"Failed to create file: {e}"
 
 
 def read_file_tool(filename: str) -> str:
     try:
-        filename = os.path.expanduser(filename)
-        with open(filename, "r") as f:
+        safe_path = _workspace_path(filename)
+        with open(safe_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read(2000)
-        return f"Contents of **{filename}**:\n```\n{content}\n```"
+        return f"Contents of **{_display_path(safe_path)}**:\n```\n{content}\n```"
+    except PermissionError as e:
+        return f"Access denied: {e}"
     except FileNotFoundError:
         return f"File '{filename}' not found."
     except Exception as e:
@@ -139,9 +170,13 @@ def read_file_tool(filename: str) -> str:
 
 def delete_file_tool(filename: str) -> str:
     try:
-        filename = os.path.expanduser(filename)
-        os.remove(filename)
-        return f"File **{filename}** deleted."
+        safe_path = _workspace_path(filename)
+        if safe_path.is_dir():
+            return "Refusing to delete a directory. Specify a file inside ARIA's workspace."
+        os.remove(safe_path)
+        return f"File **{_display_path(safe_path)}** deleted."
+    except PermissionError as e:
+        return f"Access denied: {e}"
     except FileNotFoundError:
         return f"File '{filename}' not found."
     except Exception as e:
@@ -153,13 +188,13 @@ def delete_file_tool(filename: str) -> str:
 # ──────────────────────────────────────────────
 
 APP_ALIASES = {
-    "calculator": {"Windows": "calc",           "Darwin": "open -a Calculator",      "Linux": "gnome-calculator"},
-    "notepad":    {"Windows": "notepad",         "Darwin": "open -a TextEdit",        "Linux": "gedit"},
-    "browser":    {"Windows": "start chrome",    "Darwin": "open -a 'Google Chrome'", "Linux": "xdg-open https://google.com"},
-    "terminal":   {"Windows": "start cmd",       "Darwin": "open -a Terminal",        "Linux": "x-terminal-emulator"},
-    "explorer":   {"Windows": "explorer",        "Darwin": "open .",                  "Linux": "nautilus ."},
-    "music":      {"Windows": "start wmplayer",  "Darwin": "open -a Music",           "Linux": "rhythmbox"},
-    "files":      {"Windows": "explorer",        "Darwin": "open .",                  "Linux": "nautilus ."},
+    "calculator": {"Windows": ["calc.exe"], "Darwin": ["open", "-a", "Calculator"], "Linux": ["gnome-calculator"]},
+    "notepad":    {"Windows": ["notepad.exe"], "Darwin": ["open", "-a", "TextEdit"], "Linux": ["gedit"]},
+    "browser":    {"Windows": ["cmd.exe", "/c", "start", "", "https://google.com"], "Darwin": ["open", "https://google.com"], "Linux": ["xdg-open", "https://google.com"]},
+    "terminal":   {"Windows": ["cmd.exe"], "Darwin": ["open", "-a", "Terminal"], "Linux": ["x-terminal-emulator"]},
+    "explorer":   {"Windows": ["explorer.exe", str(WORKSPACE_ROOT)], "Darwin": ["open", str(WORKSPACE_ROOT)], "Linux": ["xdg-open", str(WORKSPACE_ROOT)]},
+    "music":      {"Windows": ["wmplayer.exe"], "Darwin": ["open", "-a", "Music"], "Linux": ["rhythmbox"]},
+    "files":      {"Windows": ["explorer.exe", str(WORKSPACE_ROOT)], "Darwin": ["open", str(WORKSPACE_ROOT)], "Linux": ["xdg-open", str(WORKSPACE_ROOT)]},
 }
 
 def open_app(app_name: str) -> str:
@@ -169,7 +204,7 @@ def open_app(app_name: str) -> str:
         cmd = APP_ALIASES[key].get(system)
         if cmd:
             try:
-                subprocess.Popen(cmd, shell=True)
+                subprocess.Popen(cmd, shell=False)
                 return f"Opening **{app_name}**..."
             except Exception as e:
                 return f"Failed to open {app_name}: {e}"

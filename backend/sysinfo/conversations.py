@@ -46,6 +46,14 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_ts      ON messages(ts);
+CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_messages_role_ts ON messages(role, ts);
+
+CREATE TABLE IF NOT EXISTS session_summaries (
+    session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    summary    TEXT    NOT NULL DEFAULT '',
+    updated_at REAL    NOT NULL
+);
 
 -- Full-text search virtual table
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
@@ -150,14 +158,56 @@ class ConversationStore:
         """, (session_id, n)).fetchall()
         return [dict(r) for r in reversed(rows)]
 
-    def session_messages(self, session_id: int) -> list[dict]:
+    def session_messages(self, session_id: int, limit: int = 200, offset: int = 0) -> list[dict]:
         """Return ALL messages in a session (for the history UI)."""
         conn = self._conn()
         rows = conn.execute("""
             SELECT id, role, text, ts FROM messages
-            WHERE session_id=? ORDER BY ts
-        """, (session_id,)).fetchall()
+            WHERE session_id=? ORDER BY ts LIMIT ? OFFSET ?
+        """, (session_id, limit, offset)).fetchall()
         return [dict(r) for r in rows]
+
+    def summary(self, session_id: int) -> str:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT summary FROM session_summaries WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        return row["summary"] if row else ""
+
+    def upsert_summary(self, session_id: int, summary: str):
+        conn = self._conn()
+        conn.execute("""
+            INSERT INTO session_summaries(session_id, summary, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                summary=excluded.summary,
+                updated_at=excluded.updated_at
+        """, (session_id, summary.strip()[:4000], time.time()))
+        conn.commit()
+
+    def maybe_refresh_summary(self, session_id: int, every_messages: int = 12):
+        """Create a compact extractive summary without invoking the LLM."""
+        conn = self._conn()
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE session_id=?",
+            (session_id,),
+        ).fetchone()["n"]
+        if count < every_messages or count % every_messages != 0:
+            return
+        rows = conn.execute("""
+            SELECT role, text FROM messages
+            WHERE session_id=? ORDER BY ts DESC LIMIT ?
+        """, (session_id, every_messages)).fetchall()
+        snippets = []
+        for r in reversed(rows):
+            text = " ".join(r["text"].split())
+            if len(text) > 220:
+                text = text[:220] + "..."
+            snippets.append(f"{r['role']}: {text}")
+        prior = self.summary(session_id)
+        summary = "\n".join([prior, *snippets]).strip()
+        self.upsert_summary(session_id, summary[-4000:])
 
     # ── Search ────────────────────────────────────────────────────────────────
 

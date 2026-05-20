@@ -25,19 +25,31 @@ from tools import (
     list_directory, create_file_tool, read_file_tool, delete_file_tool,
     open_app, get_system_info,
 )
-from search import web_search, wikipedia_search_and_summarize
+from search import (
+    web_search,
+    web_search_async,
+    wikipedia_search_and_summarize,
+    wikipedia_search_and_summarize_async,
+)
 import ollama as ollama_engine
 import sysinfo.music as music_engine
+from memory_extract import relevant_facts, store_explicit_facts
 from sysinfo.weather import get_weather
 from sysinfo.converter import convert
 from sysinfo.clipboard_tool import handle_clipboard_read, handle_clipboard_write, handle_screenshot
 import sysinfo.scheduler as scheduler_engine
 import sysinfo.calendar_tool as calendar_engine
+import sysinfo.actions as actions_engine
+import sysinfo.typed_memory as typed_memory
+import sysinfo.tasks as tasks_engine
+import sysinfo.plugins as plugins_engine
+import sysinfo.workspace_index as workspace_engine
 
 logger = logging.getLogger("aria.brain")
 
 MUSIC_PLAY_PREFIX = "MUSIC_PLAY:"
 MUSIC_STOP_PREFIX = "MUSIC_STOP:"
+ACTION_PENDING_PREFIX = "ACTION_PENDING:"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -53,7 +65,8 @@ def _extract(text: str, pattern: str, group: int = 1):
 def _handle_greeting(text, memory):
     greetings = ["hello","hi","hey","good morning","good evening",
                  "good afternoon","howdy","what's up","sup","greetings"]
-    if not _contains(text, *greetings):
+    cleaned = re.sub(r"[^\w\s']", "", text).strip()
+    if cleaned not in greetings and not any(cleaned.startswith(f"{g} ") and len(cleaned.split()) <= 4 for g in greetings):
         return None
     name = memory.recall("user_name")
     return random.choice([
@@ -97,7 +110,10 @@ def _handle_name_recall(text, memory):
            "I don't know your name yet. You can tell me with 'My name is ...'."
 
 def _handle_time(text, memory):
-    if not _contains(text,"time","clock","hour"):
+    if not re.search(
+        r"\b(what(?:'s| is)? the time|what time is it|current time|clock|what hour is it)\b",
+        text,
+    ):
         return None
     return get_time()
 
@@ -138,17 +154,47 @@ def _handle_files(text, memory):
     if _contains(text,"create file","make file","new file","write file"):
         fname = _extract(text, r"(?:create|make|new|write)\s+(?:a\s+)?(?:file\s+)?['\"]?([^\s'\"]+\.\w+)['\"]?")
         content = _extract(text, r"(?:with content|containing|with text)\s+['\"]?(.+)['\"]?$")
-        return create_file_tool(fname, content or "") if fname else "What should I name the file?"
+        if not fname:
+            return "What should I name the file?"
+        action = actions_engine.create_action(
+            "files.write",
+            f"Create or overwrite `{fname}`",
+            {"tool": "files.write", "args": {"filename": fname, "content": content or ""}},
+            "write-local",
+        )
+        if action.get("auto_approved"):
+            return f"Auto-approved **{action['summary']}**.\n\n{action.get('result', '')}"
+        return f"{ACTION_PENDING_PREFIX}{action['id']}"
     if _contains(text,"delete file","remove file","erase file"):
         fname = _extract(text, r"(?:delete|remove|erase)\s+(?:file\s+)?['\"]?([^\s'\"]+\.\w+)['\"]?")
-        return delete_file_tool(fname) if fname else "Which file should I delete?"
+        if not fname:
+            return "Which file should I delete?"
+        action = actions_engine.create_action(
+            "files.delete",
+            f"Delete `{fname}`",
+            {"tool": "files.delete", "args": {"filename": fname}},
+            "write-local",
+        )
+        if action.get("auto_approved"):
+            return f"Auto-approved **{action['summary']}**.\n\n{action.get('result', '')}"
+        return f"{ACTION_PENDING_PREFIX}{action['id']}"
     return None
 
 def _handle_open_app(text, memory):
     if not _contains(text,"open","launch","start","run"):
         return None
     app = _extract(text, r"(?:open|launch|start|run)\s+(?:the\s+)?([a-zA-Z]+)")
-    return open_app(app) if app else None
+    if not app:
+        return None
+    action = actions_engine.create_action(
+        "apps.open",
+        f"Open `{app}`",
+        {"tool": "apps.open", "args": {"app": app}},
+        "system",
+    )
+    if action.get("auto_approved"):
+        return f"Auto-approved **{action['summary']}**.\n\n{action.get('result', '')}"
+    return f"{ACTION_PENDING_PREFIX}{action['id']}"
 
 def _handle_system(text, memory):
     if _contains(text,"system info","system information","about this computer",
@@ -157,17 +203,38 @@ def _handle_system(text, memory):
     return None
 
 def _handle_memory_commands(text, memory):
+    project_fact = _extract(text, r"remember\s+(.+?)\s+as\s+(?:a\s+)?project\s+note")
+    if project_fact:
+        rec = typed_memory.add_record("project", "project_note", project_fact, source="chat")
+        memory.remember(f"typed_{rec['id']}", project_fact)
+        return f"Project note saved: *{project_fact}*"
+    pref_fact = _extract(text, r"remember\s+(.+?)\s+as\s+(?:a\s+)?preference")
+    if pref_fact:
+        rec = typed_memory.add_record("preference", "preference", pref_fact, source="chat")
+        memory.remember(f"typed_{rec['id']}", pref_fact)
+        return f"Preference saved: *{pref_fact}*"
+    forget_pref = _extract(text, r"forget\s+(?:my\s+)?preference\s+(?:about|for)?\s*(.+)")
+    if forget_pref:
+        n = typed_memory.forget_by_query("preference", forget_pref)
+        return f"Forgot **{n}** matching preference{'s' if n != 1 else ''}."
     if _contains(text,"remember that","don't forget","keep in mind","note that"):
         fact = _extract(text, r"(?:remember that|don't forget|keep in mind|note that)\s+(.+)")
         if fact:
+            typed_memory.add_record("note", f"note_{len(memory.facts)}", fact, source="chat")
             memory.remember(f"note_{len(memory.facts)}", fact)
             return f"Noted: *{fact}*"
     if _contains(text,"what do you remember","what do you know about me",
                  "what have you noted","show memory","your memory"):
-        if not memory.facts:
+        records = typed_memory.list_records()
+        if not memory.facts and not records:
             return "I haven't noted anything about you yet this session."
-        lines = "\n".join(f"- **{k}**: {v}" for k,v in memory.facts.items()
-                          if not k.startswith("_"))
+        lines = "\n".join(
+            f"- **{r.get('type')} / {r.get('key')}**: {r.get('value')}"
+            for r in records[:12]
+        )
+        if not lines:
+            lines = "\n".join(f"- **{k}**: {v}" for k,v in memory.facts.items()
+                              if not k.startswith("_"))
         return f"Here's what I remember:\n{lines}" if lines else "Nothing noted yet."
     if _contains(text,"forget everything","clear memory","reset memory","forget all"):
         memory.reset()
@@ -356,10 +423,26 @@ def _handle_clipboard(text, memory):
     if _contains(text, "read my clipboard","what's in my clipboard",
                  "whats in my clipboard","clipboard content","show clipboard",
                  "paste from clipboard","read clipboard"):
-        return handle_clipboard_read()
+        action = actions_engine.create_action(
+            "clipboard.read",
+            "Read clipboard contents",
+            {"tool": "clipboard.read", "args": {}},
+            "system",
+        )
+        if action.get("auto_approved"):
+            return f"Auto-approved **{action['summary']}**.\n\n{action.get('result', '')}"
+        return f"{ACTION_PENDING_PREFIX}{action['id']}"
     copy_match = _extract(text, r"(?:copy|write to clipboard|add to clipboard)\s+['\"]?(.+?)['\"]?\s*(?:to clipboard)?$")
     if copy_match and _contains(text, "copy","clipboard"):
-        return handle_clipboard_write(copy_match)
+        action = actions_engine.create_action(
+            "clipboard.write",
+            f"Copy text to clipboard: {copy_match[:80]}",
+            {"tool": "clipboard.write", "args": {"text": copy_match}},
+            "system",
+        )
+        if action.get("auto_approved"):
+            return f"Auto-approved **{action['summary']}**.\n\n{action.get('result', '')}"
+        return f"{ACTION_PENDING_PREFIX}{action['id']}"
     return None
 
 def _handle_screenshot(text, memory):
@@ -370,7 +453,81 @@ def _handle_screenshot(text, memory):
     import os
     vision_model = os.getenv("OLLAMA_VISION_MODEL", "").strip() or None
     ollama_host  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    return handle_screenshot(ollama_host=ollama_host, vision_model=vision_model)
+    action = actions_engine.create_action(
+        "screenshot",
+        "Take a screenshot",
+        {"tool": "screenshot", "args": {"ollama_host": ollama_host, "vision_model": vision_model}},
+        "system",
+    )
+    if action.get("auto_approved"):
+        return f"Auto-approved **{action['summary']}**.\n\n{action.get('result', '')}"
+    return f"{ACTION_PENDING_PREFIX}{action['id']}"
+
+
+def _handle_tasks(text, memory):
+    if _contains(text, "show blocked tasks", "blocked tasks"):
+        rows = tasks_engine.list_tasks("blocked")
+        return _format_tasks(rows, "Blocked tasks")
+    if _contains(text, "what am i working on", "active tasks", "current tasks"):
+        rows = tasks_engine.list_tasks("active") or tasks_engine.list_tasks("todo")
+        return _format_tasks(rows, "Current tasks")
+    if _contains(text, "show tasks", "list tasks", "my tasks"):
+        return _format_tasks(tasks_engine.list_tasks(), "Tasks")
+    title = _extract(text, r"(?:add|create|new)\s+task\s+(.+)")
+    if title:
+        task = tasks_engine.add_task(title)
+        return f"Task added: `{task['id']}` — **{task['title']}**"
+    done = _extract(text, r"(?:mark|set)\s+task\s+(.+?)\s+(?:done|complete|completed)")
+    if done:
+        task = tasks_engine.find_task(done)
+        if not task:
+            return f"I couldn't find a task matching **{done}**."
+        updated = tasks_engine.update_task(task["id"], {"status": "done"})
+        return f"Marked task `{updated['id']}` done: **{updated['title']}**"
+    blocked = _extract(text, r"(?:mark|set)\s+task\s+(.+?)\s+blocked")
+    if blocked:
+        task = tasks_engine.find_task(blocked)
+        if not task:
+            return f"I couldn't find a task matching **{blocked}**."
+        updated = tasks_engine.update_task(task["id"], {"status": "blocked"})
+        return f"Marked task `{updated['id']}` blocked: **{updated['title']}**"
+    return None
+
+
+def _format_tasks(rows: list[dict], title: str) -> str:
+    if not rows:
+        return f"No {title.lower()}."
+    lines = [f"**{title}:**"]
+    for task in rows[:12]:
+        lines.append(f"- `{task['id']}` [{task['status']}] **{task['title']}**")
+    return "\n".join(lines)
+
+
+def _handle_workspace(text, memory):
+    query = _extract(text, r"search\s+(?:my\s+)?workspace\s+(?:for\s+)?(.+)")
+    if query:
+        results = workspace_engine.search(query)
+        if not results:
+            return f"No workspace files matched **{query}**."
+        lines = [f"**Workspace results for \"{query}\":**"]
+        for item in results[:8]:
+            preview = item.get("preview", "").replace("\n", " ")[:160]
+            lines.append(f"- `{item['path']}` — {preview}")
+        return "\n".join(lines)
+    folder = _extract(text, r"summarize\s+(?:this\s+)?folder\s*([^\s]*)")
+    if folder is not None:
+        return workspace_engine.summarize_folder(folder or ".")
+    where = _extract(text, r"where\s+is\s+(.+?)\s+handled")
+    if where:
+        results = workspace_engine.search(where)
+        if not results:
+            return f"I couldn't find where **{where}** is handled in the workspace index."
+        return "\n".join(["Likely matches:"] + [f"- `{r['path']}`" for r in results[:6]])
+    return None
+
+
+def _handle_plugins(text, memory):
+    return plugins_engine.handle_command(text, memory)
 
 def _handle_reminders(text, memory):
     if _contains(text, "show reminders","list reminders","my reminders",
@@ -583,7 +740,7 @@ def _handle_force_ollama(text, memory):
 def _call_ollama(user_input, memory):
     if not ollama_engine.is_available():
         return None
-    history = memory.recent(10)
+    history = _llm_context(user_input, memory)
     try:
         response = ollama_engine.generate(user_input, history)
         logger.info(f"[LLM] {ollama_engine.active_model()} responded ({len(response)} chars)")
@@ -613,6 +770,28 @@ def _handle_ollama_status(text, memory):
 def _handle_llm_fallback(text, memory):
     return _call_ollama(text, memory)
 
+
+def _llm_context(user_input: str, memory: Memory) -> list[dict]:
+    context: list[dict] = []
+    conv_sid = memory.recall("_session_id")
+    if conv_sid:
+        try:
+            from sysinfo.conversations import store
+            summary = store.summary(int(conv_sid))
+            if summary:
+                context.append({"role": "summary", "text": summary})
+        except Exception:
+            pass
+    for key, value in relevant_facts(memory, user_input):
+        context.append({"role": "memory", "text": f"{key}: {value}"})
+    for rec in typed_memory.relevant(user_input):
+        context.append({
+            "role": "memory",
+            "text": f"{rec.get('type')}:{rec.get('key')}={rec.get('value')}",
+        })
+    context.extend(memory.recent(10))
+    return context
+
 def _handle_unknown(text, memory):
     return ("I'm not sure how to handle that. You can:\n"
             "- Ask me anything (I'll search the web)\n"
@@ -638,6 +817,7 @@ HANDLERS = [
     _handle_thanks,
     _handle_help,
     _handle_memory_commands,
+    _handle_tasks,
     _handle_history,
     _handle_history_search,
     _handle_date,
@@ -653,24 +833,68 @@ HANDLERS = [
     _handle_files,
     _handle_open_app,
     _handle_system,
+    _handle_workspace,
     _handle_wikipedia,
     _handle_web_search,
     _handle_question_fallback,
     _handle_ollama_status,
     _handle_force_ollama,
+    _handle_plugins,
     _handle_llm_fallback,
 ]
 
 _LLM_HANDLERS = {_handle_force_ollama, _handle_llm_fallback}
+_ASYNC_SEARCH_HANDLERS = {_handle_wikipedia, _handle_web_search, _handle_question_fallback}
+
+
+async def _handle_async_search(text: str) -> str | None:
+    for p in [r"(?:wikipedia|wiki)\s+(?:search\s+)?(?:for\s+)?(.+)",
+              r"(?:look up|lookup|search wikipedia for)\s+(.+)",
+              r"(?:tell me about|what is|who is|who was|what was|what are|who are)\s+(.+?)\s+(?:on wikipedia|from wikipedia|according to wikipedia)"]:
+        q = _extract(text, p)
+        if q and len(q) > 2:
+            return await wikipedia_search_and_summarize_async(q)
+    if text.startswith("wiki "):
+        q = text[5:].strip()
+        if q:
+            return await wikipedia_search_and_summarize_async(q)
+
+    for p in [r"(?:search|search for|google|look up|find|search the web for)\s+(.+)",
+              r"(?:search online for|search duckduckgo for|web search)\s+(.+)"]:
+        q = _extract(text, p)
+        if q and len(q) > 2:
+            return await web_search_async(q)
+
+    starters = [
+        "what is","what are","what was","what were",
+        "who is","who are","who was","who were",
+        "where is","where are","where was",
+        "when is","when was","when did",
+        "why is","why are","why does","why did",
+        "how does","how do","how did","how is",
+        "tell me about","explain","define","definition of",
+        "meaning of","history of","facts about",
+    ]
+    if any(text.startswith(s) or f" {s} " in f" {text} " for s in starters) or (
+        len(text.split()) >= 3 and text.endswith("?")
+    ):
+        query = re.sub(r"[?!]+$", "", text).strip()
+        query = re.sub(r"^(?:please\s+|can you\s+|could you\s+)", "", query, flags=re.IGNORECASE)
+        result = await wikipedia_search_and_summarize_async(query)
+        if result and "No Wikipedia article" not in result:
+            return result
+        return await web_search_async(query)
+    return None
 
 
 def process(user_input: str, memory: Memory) -> str:
     text = user_input.lower().strip()
+    store_explicit_facts(memory, user_input)
     memory.add("user", user_input)
     for handler in HANDLERS:
         response = handler(text, memory)
         if response is not None:
-            memory.add("aria", response)
+            memory.add("aria", _memory_response_text(response))
             return response
     response = _handle_unknown(text, memory)
     memory.add("aria", response)
@@ -679,16 +903,25 @@ def process(user_input: str, memory: Memory) -> str:
 
 async def process_stream(user_input: str, memory: Memory) -> AsyncIterator[str]:
     text = user_input.lower().strip()
+    store_explicit_facts(memory, user_input)
     memory.add("user", user_input)
 
     for handler in HANDLERS:
         if handler in _LLM_HANDLERS:
             continue
+        if handler in _ASYNC_SEARCH_HANDLERS:
+            continue
         response = handler(text, memory)
         if response is not None:
-            memory.add("aria", response)
+            memory.add("aria", _memory_response_text(response))
             yield response
             return
+
+    response = await _handle_async_search(text)
+    if response is not None:
+        memory.add("aria", response)
+        yield response
+        return
 
     llm_input = text
     for prefix in ("use ollama ","ask llm ","ask the llm ","llm "):
@@ -700,8 +933,8 @@ async def process_stream(user_input: str, memory: Memory) -> AsyncIterator[str]:
             llm_input = stripped
             break
 
-    if ollama_engine.is_available():
-        history    = memory.recent(10)
+    if await ollama_engine.is_available_async():
+        history    = _llm_context(llm_input, memory)
         full_parts: list[str] = []
         had_chunks = False
         try:
@@ -724,3 +957,10 @@ async def process_stream(user_input: str, memory: Memory) -> AsyncIterator[str]:
     response = _handle_unknown(text, memory)
     memory.add("aria", response)
     yield response
+
+
+def _memory_response_text(response: str) -> str:
+    if response.startswith(ACTION_PENDING_PREFIX):
+        action_id = response[len(ACTION_PENDING_PREFIX):]
+        return f"Action pending approval: {action_id}"
+    return response

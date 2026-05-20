@@ -26,20 +26,26 @@ Supported models (anything Ollama supports works; these are recommended):
 import os
 import json
 import logging
-import urllib.request
-import urllib.error
+import asyncio
+import httpx
 from typing import AsyncIterator, Iterator
+from settings import (
+    OLLAMA_CONNECT_TIMEOUT,
+    OLLAMA_GENERATE_TIMEOUT,
+    OLLAMA_HOST as SETTINGS_OLLAMA_HOST,
+    OLLAMA_MODEL as SETTINGS_OLLAMA_MODEL,
+)
 
 logger = logging.getLogger("aria.ollama")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
+OLLAMA_HOST  = SETTINGS_OLLAMA_HOST
+OLLAMA_MODEL = SETTINGS_OLLAMA_MODEL
 
 # Timeouts (seconds)
-_CONNECT_TIMEOUT  = 3    # availability check — fail fast
-_GENERATE_TIMEOUT = 60   # generation — models can be slow on CPU
+_CONNECT_TIMEOUT  = OLLAMA_CONNECT_TIMEOUT
+_GENERATE_TIMEOUT = OLLAMA_GENERATE_TIMEOUT
 
 # System prompt — shapes ARIA's personality when the LLM is used
 _SYSTEM_PROMPT = """You are ARIA (Adaptive Reasoning & Intelligent Assistant), a local AI assistant running on the user's own machine.
@@ -66,29 +72,53 @@ Constraints:
 
 # ── HTTP helper ───────────────────────────────────────────────────────────────
 
-def _post(path: str, payload: dict, timeout: int) -> dict:
+async def _post_async(path: str, payload: dict, timeout: float) -> dict:
     """POST JSON to Ollama and return the parsed response dict."""
-    url  = f"{OLLAMA_HOST}{path}"
-    body = json.dumps(payload).encode()
-    req  = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(f"{OLLAMA_HOST}{path}", json=payload)
+        resp.raise_for_status()
+        return resp.json()
 
 
-def _get(path: str, timeout: int = _CONNECT_TIMEOUT) -> dict:
+async def _get_async(path: str, timeout: float = _CONNECT_TIMEOUT) -> dict:
     """GET JSON from Ollama."""
-    url = f"{OLLAMA_HOST}{path}"
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(f"{OLLAMA_HOST}{path}")
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _run(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise RuntimeError("Synchronous Ollama API called from a running event loop")
+
+
+def _get_sync(path: str, timeout: float = _CONNECT_TIMEOUT) -> dict:
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.get(f"{OLLAMA_HOST}{path}")
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _post_sync(path: str, payload: dict, timeout: float) -> dict:
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(f"{OLLAMA_HOST}{path}", json=payload)
+        resp.raise_for_status()
+        return resp.json()
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+async def is_available_async() -> bool:
+    try:
+        await _get_async("/api/tags")
+        return True
+    except Exception:
+        return False
+
 
 def is_available() -> bool:
     """
@@ -96,10 +126,18 @@ def is_available() -> bool:
     Fails fast (3 s timeout) so startup isn't held up.
     """
     try:
-        _get("/api/tags")
+        _get_sync("/api/tags")
         return True
     except Exception:
         return False
+
+
+async def list_models_async() -> list[str]:
+    try:
+        data = await _get_async("/api/tags")
+        return [m["name"] for m in data.get("models", [])]
+    except Exception:
+        return []
 
 
 def list_models() -> list[str]:
@@ -108,7 +146,7 @@ def list_models() -> list[str]:
     Returns an empty list if Ollama is unreachable.
     """
     try:
-        data = _get("/api/tags")
+        data = _get_sync("/api/tags")
         return [m["name"] for m in data.get("models", [])]
     except Exception:
         return []
@@ -131,7 +169,15 @@ def _build_prompt(user_input: str, history: list[dict]) -> str:
     """
     lines = [f"[System]\n{_SYSTEM_PROMPT.strip()}\n"]
 
-    for entry in history[-6:]:
+    memory_entries = [e for e in history if e.get("role") in {"memory", "summary"}]
+    for entry in memory_entries[-10:]:
+        role = "Memory" if entry.get("role") == "memory" else "Conversation Summary"
+        text = entry.get("text", "").strip()
+        if text:
+            lines.append(f"[{role}]\n{text}")
+
+    turns = [e for e in history if e.get("role") not in {"memory", "summary"}]
+    for entry in turns[-6:]:
         role  = entry.get("role", "")
         text  = entry.get("text", "").strip()
         if not text:
@@ -146,7 +192,7 @@ def _build_prompt(user_input: str, history: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def generate(user_input: str, history: list[dict]) -> str:
+async def generate_async(user_input: str, history: list[dict]) -> str:
     """
     Send user_input + conversation history to Ollama and return the
     model's response as a plain string.
@@ -158,7 +204,7 @@ def generate(user_input: str, history: list[dict]) -> str:
     prompt = _build_prompt(user_input, history)
 
     try:
-        data = _post(
+        data = await _post_async(
             "/api/generate",
             {
                 "model":  OLLAMA_MODEL,
@@ -172,15 +218,42 @@ def generate(user_input: str, history: list[dict]) -> str:
             },
             timeout=_GENERATE_TIMEOUT,
         )
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Ollama unreachable: {exc.reason}") from exc
-    except TimeoutError as exc:
+    except httpx.TimeoutException as exc:
         raise TimeoutError(f"Ollama timed out after {_GENERATE_TIMEOUT}s") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Ollama unreachable: {exc}") from exc
 
     response = data.get("response", "").strip()
     if not response:
         raise RuntimeError("Ollama returned an empty response")
 
+    return response
+
+
+def generate(user_input: str, history: list[dict]) -> str:
+    prompt = _build_prompt(user_input, history)
+    try:
+        data = _post_sync(
+            "/api/generate",
+            {
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "num_predict": 512,
+                },
+            },
+            timeout=_GENERATE_TIMEOUT,
+        )
+    except httpx.TimeoutException as exc:
+        raise TimeoutError(f"Ollama timed out after {_GENERATE_TIMEOUT}s") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Ollama unreachable: {exc}") from exc
+    response = data.get("response", "").strip()
+    if not response:
+        raise RuntimeError("Ollama returned an empty response")
     return response
 
 
@@ -192,11 +265,8 @@ def generate_stream(user_input: str, history: list[dict]) -> Iterator[str]:
 
     Raises RuntimeError / TimeoutError on connection failure.
     """
-    import socket
-
     prompt = _build_prompt(user_input, history)
-    url    = f"{OLLAMA_HOST}/api/generate"
-    body   = json.dumps({
+    payload = {
         "model":  OLLAMA_MODEL,
         "prompt": prompt,
         "stream": True,
@@ -205,36 +275,30 @@ def generate_stream(user_input: str, history: list[dict]) -> Iterator[str]:
             "top_p": 0.9,
             "num_predict": 512,
         },
-    }).encode()
-
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    }
 
     try:
-        with urllib.request.urlopen(req, timeout=_GENERATE_TIMEOUT) as resp:
-            for raw_line in resp:
-                line = raw_line.decode().strip()
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+        with httpx.Client(timeout=_GENERATE_TIMEOUT) as client:
+            with client.stream("POST", f"{OLLAMA_HOST}/api/generate", json=payload) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                token = chunk.get("response", "")
-                if token:
-                    yield token
+                    token = chunk.get("response", "")
+                    if token:
+                        yield token
 
-                if chunk.get("done", False):
-                    break
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Ollama unreachable: {exc.reason}") from exc
-    except socket.timeout as exc:
+                    if chunk.get("done", False):
+                        break
+    except httpx.TimeoutException as exc:
         raise TimeoutError(f"Ollama stream timed out after {_GENERATE_TIMEOUT}s") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Ollama unreachable: {exc}") from exc
 
 
 async def generate_stream_async(user_input: str, history: list[dict]) -> AsyncIterator[str]:
@@ -242,48 +306,56 @@ async def generate_stream_async(user_input: str, history: list[dict]) -> AsyncIt
     Async streaming generator — yields text chunks from Ollama without
     blocking the event loop.
 
-    Wraps generate_stream() (synchronous, blocking I/O) using asyncio's
-    thread-pool executor so FastAPI / uvicorn stay responsive while the
-    model is generating.
+    Uses httpx streaming so FastAPI / uvicorn stay responsive while the
+    model is generating, and cancellation can propagate from the WebSocket.
 
     Usage in an async context:
         async for chunk in generate_stream_async(text, history):
             await ws.send_text(json.dumps({"type": "stream_chunk", "text": chunk}))
     """
-    import asyncio
-    import queue
-    import threading
+    prompt = _build_prompt(user_input, history)
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": True,
+        "options": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "num_predict": 512,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_GENERATE_TIMEOUT) as client:
+            async with client.stream("POST", f"{OLLAMA_HOST}/api/generate", json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    token = chunk.get("response", "")
+                    if token:
+                        yield token
+                    if chunk.get("done", False):
+                        break
+    except httpx.TimeoutException as exc:
+        raise TimeoutError(f"Ollama stream timed out after {_GENERATE_TIMEOUT}s") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Ollama unreachable: {exc}") from exc
 
-    loop = asyncio.get_event_loop()
-    q: queue.Queue[str | None] = queue.Queue()
-    exc_holder: list[Exception] = []
 
-    def _producer():
-        """Run the blocking generator in a thread; push tokens onto the queue."""
-        try:
-            for token in generate_stream(user_input, history):
-                q.put(token)
-        except Exception as e:
-            exc_holder.append(e)
-        finally:
-            q.put(None)  # sentinel
+def model_capabilities(model_name: str) -> set[str]:
+    name = model_name.lower()
+    caps = {"text"}
+    if any(key in name for key in ("code", "coder", "deepseek-coder", "qwen2.5-coder")):
+        caps.add("code")
+    if any(key in name for key in ("llava", "bakllava", "moondream", "vision", "minicpm-v")):
+        caps.add("vision")
+    return caps
 
-    thread = threading.Thread(target=_producer, daemon=True)
-    thread.start()
 
-    while True:
-        # Poll the queue without blocking the event loop
-        try:
-            token = await loop.run_in_executor(None, q.get)
-        except Exception:
-            break
-
-        if token is None:
-            break  # sentinel received — generation complete
-
-        yield token
-
-    thread.join(timeout=1)
-
-    if exc_holder:
-        raise exc_holder[0]
+async def models_with_capabilities_async() -> list[dict]:
+    models = await list_models_async()
+    return [{"name": m, "capabilities": sorted(model_capabilities(m))} for m in models]
